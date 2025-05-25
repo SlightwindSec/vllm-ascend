@@ -538,7 +538,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 num_heads=self.num_heads,
                 num_kv_heads=self.num_heads,
                 out=attn_output)
-            attn_output = attn_output.view(-1, self.num_heads,self.v_head_dim)
+            attn_output = attn_output.view(-1, self.num_heads, self.v_head_dim)
         else:
             raise RuntimeError(
                 "Unexpected path reached, AscendMLAImpl should only have PrefillNoCache and ChunkedPrefill scenario in forward prefill, please file a bug to vllm-ascend !"
