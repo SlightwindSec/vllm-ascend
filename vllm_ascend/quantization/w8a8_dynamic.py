@@ -51,7 +51,7 @@ def process_topk_ids(
         raise ValueError("expert_num // ep_size is 0, which leads to division by zero in ep_rank calculation. "
                          "Ensure expert_num >= ep_size.")
 
-    assigned_ep_rank = topk_ids // experts_per_ep_rank_val
+    assigned_ep_rank = (topk_ids.float() / experts_per_ep_rank_val).to(original_dtype)
     indices_arange = torch.arange(topk_ids.shape[0], device=device)
 
     is_new_segment = torch.cat((
@@ -60,11 +60,11 @@ def process_topk_ids(
     ))
     temp_start_markers = torch.full_like(indices_arange, -1, dtype=indices_arange.dtype)
     temp_start_markers[is_new_segment] = indices_arange[is_new_segment]
-    start_offset_for_each_token = torch.cummax(temp_start_markers, dim=0)[0]
+    start_offset_for_each_token = torch.cummax(temp_start_markers.float(), dim=0)[0].to(temp_start_markers.dtype)
     token_intra_ep_rank_idx = indices_arange - start_offset_for_each_token
     is_kept_mask = token_intra_ep_rank_idx < max_row_per_ep_rank
-    cumsum_kept = torch.cumsum(is_kept_mask.to(torch.long), dim=0)
-    indices_in_rec_cond_list_for_all = cumsum_kept - 1 
+    cumsum_kept = torch.cumsum(is_kept_mask.float(), dim=0).to(torch.long)
+    indices_in_rec_cond_list_for_all = cumsum_kept - 1
     unpad_indices = torch.where(
         is_kept_mask,
         indices_in_rec_cond_list_for_all,
@@ -289,7 +289,7 @@ def fused_experts_with_all2all(
             expert_idx=topk_ids,
             active_num=num_tokens)
 
-        local_buffer_rows = 32 * 4096 * top_k // ep_group.world_size * 2
+        local_buffer_rows = (num_tokens // ep_group.world_size + 1) * ep_group.world_size * top_k * 2
         max_row_per_ep_rank = local_buffer_rows // ep_group.world_size
         expert_idx_buffer_scatter, unpad_indices = process_topk_ids(
             expanded_expert_idx,
@@ -325,7 +325,7 @@ def fused_experts_with_all2all(
             dtype=hidden_states_buffer_scatter.dtype,
             device=hidden_states_buffer_scatter.device
         )
-        
+
         dist.all_to_all_single(hidden_states_buffer_gather,
                                hidden_states_buffer_scatter,
                                group=ep_group.device_group)
