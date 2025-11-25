@@ -84,6 +84,7 @@ class AscendW8A8LinearMethod:
         params_dict["weight_offset"] = torch.empty(output_size,
                                                    1,
                                                    dtype=params_dtype)
+        params_dict["bias"] = torch.zeros(output_size, dtype=torch.float32)
         return params_dict
 
     def get_pergroup_param(self,
