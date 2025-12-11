@@ -435,7 +435,6 @@ class TestUnifiedApplyMLP(TestBase):
 
         mock_forward_context = MagicMock()
         mock_forward_context.with_quant = True
-        mock_forward_context.fused_moe_state = "NOT_MC2"
         mock_get_forward_context.return_value = mock_forward_context
 
         mock_npu_grouped_matmul.side_effect = [[
@@ -540,7 +539,6 @@ class TestUnifiedApplyMLP(TestBase):
 
         mock_forward_context = MagicMock()
         mock_forward_context.with_quant = True
-        mock_forward_context.fused_moe_state = "NOT_MC2"
         mock_get_forward_context.return_value = mock_forward_context
 
         mock_npu_grouped_matmul_swiglu_quant.return_value = (torch.randint(
