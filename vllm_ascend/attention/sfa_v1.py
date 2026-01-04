@@ -31,7 +31,6 @@ from vllm_ascend.ops.shared_weight_layer import (
     register_layer_to_shared_weight_series)
 from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
-from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, _round_up, dispose_layer,
                                enable_sp, maybe_trans_nz, replace_layer)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -363,6 +362,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
 
+        # Initialize MLAPO strategy if enabled
+        self.mlapo_strategy = None
+        if self.enable_mlapo:
+            from vllm_ascend.attention.mlapo_strategy import SFAMLAPOStrategy
+            self.mlapo_strategy = SFAMLAPOStrategy()
+
         assert self.indexer is not None, "Indexer is required for DSA."
 
         self.enable_sfa_cp = enable_sp()
@@ -440,28 +445,15 @@ class AscendSFAImpl(MLAAttentionImpl):
                 post_process_after_loading_for_shared_weight_series(
                     self.o_proj)
 
-        if self.enable_mlapo:
-            quant_method = getattr(
-                getattr(self.fused_qkv_a_proj, "quant_method", None),
-                "quant_method",
-                None,
-            )
-            reasons = []
-            if self.fused_qkv_a_proj is None or not isinstance(
-                    quant_method, AscendW8A8LinearMethod):
-                reasons.append(
-                    "Currently mlapo only supports W8A8 quantization in SFA scenario."
-                    "Some layers in your model are not quantized with W8A8,"
-                    "thus mlapo is disabled for these layers.")
-            if self.enable_sfa_cp:
-                reasons.append("Currently mlapo does not support SFA with CP,"
-                               "thus mlapo is disabled for these layers.")
-            if reasons:
+        if self.mlapo_strategy:
+            can_enable, reasons = self.mlapo_strategy.can_enable(self)
+            if can_enable:
+                self.mlapo_strategy.process_weights(self, act_dtype)
+            else:
                 self.enable_mlapo = False
+                self.mlapo_strategy = None
                 for msg in reasons:
                     logger.warning_once(msg)
-            else:
-                self._process_weights_for_fused_mlapo(act_dtype)
         if not self.enable_mlapo:
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
@@ -760,7 +752,8 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         # TODO(zzzzwwjj): In sfa, prefill and decode have the same calculation formula,
         # so `has_prefill` here is not necessary.
-        if self.enable_mlapo and not has_prefill:
+        # Use MLAPO strategy if available (SFA has different return format)
+        if self.mlapo_strategy and not has_prefill:
             hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_decode(
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,

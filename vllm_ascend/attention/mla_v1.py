@@ -25,7 +25,6 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          enable_cp,
                                          maybe_save_kv_layer_to_connector,
                                          split_decodes_and_prefills,
-                                         trans_rope_weight, transdata,
                                          wait_for_kv_layer_from_connector)
 from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_params, get_graph_params,
@@ -36,7 +35,6 @@ from vllm_ascend.ops.shared_weight_layer import (
     reach_layer_for_shared_weight_series,
     register_layer_to_shared_weight_series)
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
-from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND,
                                flashcomm2_o_shared_enabled, maybe_trans_nz,
                                weak_ref_tensors)
@@ -754,6 +752,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.speculative_config = self.vllm_config.speculative_config
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
 
+        # Initialize MLAPO strategy if enabled
+        self.mlapo_strategy = None
+        if self.enable_mlapo:
+            from vllm_ascend.attention.mlapo_strategy import MLAMLAPOStrategy
+            self.mlapo_strategy = MLAMLAPOStrategy()
+
         self.is_kv_producer = self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.is_kv_producer
 
     def _v_up_proj(self, x):
@@ -809,105 +813,23 @@ class AscendMLAImpl(MLAAttentionImpl):
         # TODO(zzzzwwjj): Currently, torch.ops._C_ascend.batch_matmul_transpose cannot support weight nz
         # self.W_UV = maybe_trans_nz(self.W_UV)
 
-        if self.enable_mlapo:
-            # Currently mlapo only supports W8A8 quantization in MLA scenario
-            # TODO(whx): modify this limitation when mlapo supports floating point
-            if self.fused_qkv_a_proj is None or not isinstance(
-                    getattr(self.fused_qkv_a_proj.quant_method, 'quant_method',
-                            None), AscendW8A8LinearMethod):
+        if self.mlapo_strategy:
+            can_enable, reasons = self.mlapo_strategy.can_enable(self)
+            if can_enable:
+                self.mlapo_strategy.process_weights(self, act_dtype)
+            else:
                 self.enable_mlapo = False
-                logger.warning_once(
-                    "Currently mlapo only supports W8A8 quantization in MLA scenario."
-                    "Some layers in your model are not quantized with W8A8,"
-                    "thus mlapo is disabled for these layers.")
-        if self.enable_mlapo:
-            self._process_weights_for_fused_mlapo(act_dtype)
-        else:
+                self.mlapo_strategy = None
+                for msg in reasons:
+                    logger.warning_once(msg)
+
+        if not self.enable_mlapo:
             # if mlapo, W_UK_T can't trans nz
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
 
         if self.fc2_o_shared_enable and is_hidden_layer(
                 self.vllm_config, self.o_proj):
             post_process_after_loading_for_shared_weight_series(self.o_proj)
-
-    def _process_weights_for_fused_mlapo(self, act_dtype: torch.dtype):
-        kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[
-            ..., self.q_lora_rank:].contiguous()
-        q_a_proj_wt = self.fused_qkv_a_proj.weight.data[
-            ..., :self.q_lora_rank].contiguous()
-        kv_a_proj_wt = kv_a_proj_wt.t().contiguous()
-        kv_a_proj_wt = trans_rope_weight(kv_a_proj_wt, self.qk_rope_head_dim)
-        kv_a_proj_wt = kv_a_proj_wt.t().contiguous()
-        wd_qkv = torch.cat((kv_a_proj_wt, q_a_proj_wt), dim=-1)
-        wd_qkv = wd_qkv.t().contiguous()
-        wd_qkv = transdata(wd_qkv,
-                           block_size=(16, 32)).unsqueeze(0).contiguous()
-        self.wd_qkv = torch_npu.npu_format_cast(wd_qkv, 29)
-
-        kv_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[
-            self.q_lora_rank:].contiguous()
-        q_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[:self.
-                                                           q_lora_rank].contiguous(
-                                                           )
-        kv_a_proj_deq_scl = kv_a_proj_deq_scl.reshape(
-            self.kv_lora_rank + self.qk_rope_head_dim, -1).contiguous()
-        kv_a_proj_deq_scl = trans_rope_weight(kv_a_proj_deq_scl,
-                                              self.qk_rope_head_dim)
-        kv_a_proj_deq_scl = kv_a_proj_deq_scl.view(
-            self.kv_lora_rank + self.qk_rope_head_dim).contiguous()
-        self.deq_scale_qkv = torch.cat((kv_a_proj_deq_scl, q_a_proj_deq_scl),
-                                       dim=-1).contiguous()
-
-        kv_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[
-            self.q_lora_rank:].contiguous()
-        q_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[:self.
-                                                            q_lora_rank].contiguous(
-                                                            )
-        kv_a_proj_qt_bias = kv_a_proj_qt_bias.reshape(
-            self.kv_lora_rank + self.qk_rope_head_dim, -1).contiguous()
-        kv_a_proj_qt_bias = trans_rope_weight(kv_a_proj_qt_bias,
-                                              self.qk_rope_head_dim)
-        kv_a_proj_qt_bias = kv_a_proj_qt_bias.view(
-            self.kv_lora_rank + self.qk_rope_head_dim).contiguous()
-        self.quant_bias_qkv = torch.cat((kv_a_proj_qt_bias, q_a_proj_qt_bias),
-                                        dim=-1).contiguous()
-
-        wu_q = self.q_proj.weight.data
-        wu_q = wu_q.t().reshape(self.num_heads,
-                                self.qk_nope_head_dim + self.qk_rope_head_dim,
-                                -1)
-        wu_q = trans_rope_weight(wu_q, self.qk_rope_head_dim)
-        wu_q = wu_q.reshape(
-            self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim),
-            -1)
-        wu_q = transdata(wu_q, block_size=(16, 32)).unsqueeze(0).contiguous()
-        self.wu_q = torch_npu.npu_format_cast(wu_q, 29)
-
-        qb_deq_scl = self.q_proj.deq_scale.data
-        qb_deq_scl = qb_deq_scl.reshape(
-            self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, -1)
-        qb_deq_scl = trans_rope_weight(qb_deq_scl, self.qk_rope_head_dim)
-        self.qb_deq_scl = qb_deq_scl.reshape(
-            self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
-
-        qb_qt_bias = self.q_proj.quant_bias.data
-        qb_qt_bias = qb_qt_bias.reshape(
-            self.num_heads, self.qk_nope_head_dim + self.qk_rope_head_dim, -1)
-        qb_qt_bias = trans_rope_weight(qb_qt_bias, self.qk_rope_head_dim)
-        self.qb_qt_bias = qb_qt_bias.reshape(
-            self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
-
-        device = self.q_proj.weight.device
-        self.gamma1 = self.q_a_layernorm.weight.data
-        self.beta1 = torch.zeros_like(self.gamma1) if (
-            _bias := self.q_a_layernorm.bias) is None else _bias.data
-        self.gamma2 = self.kv_a_layernorm.weight.data
-        self.quant_scale0 = self.fused_qkv_a_proj.input_scale.data
-        self.quant_offset0 = self.fused_qkv_a_proj.input_offset.data
-        self.quant_scale1 = self.q_proj.input_scale.data
-        self.quant_offset1 = self.q_proj.input_offset.data
-        self.ctkv_scale = torch.tensor([1], dtype=act_dtype, device=device)
-        self.q_nope_scale = torch.tensor([1], dtype=act_dtype, device=device)
 
     def get_context_seq_len_npu(self, index: int,
                                 attn_metadata: AscendMLAMetadata):
@@ -1478,11 +1400,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                                    device=hidden_states.device)
 
         # MLA Preprocess
-        if self.enable_mlapo and not has_prefill:
+        if self.mlapo_strategy and not has_prefill:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv)
-            decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess_only_decode(
-                hidden_states, kv_cache, attn_metadata)
+            decode_preprocess_res, prefill_preprocess_res = \
+                self.mlapo_strategy.preprocess_decode(
+                    self, hidden_states, kv_cache, attn_metadata)
         else:
             decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
                 layer_name, hidden_states, kv_cache, attn_metadata,
