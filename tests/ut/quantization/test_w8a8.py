@@ -4,8 +4,8 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.quantization.w8a8 import (AscendW8A8LinearMethod,
-                                           quant_per_tensor)
+from vllm_ascend.quantization.methods.w8a8_static import (AscendW8A8LinearMethod,
+                                                          quant_per_tensor)
 from vllm_ascend.utils import AscendDeviceType
 
 
@@ -63,7 +63,7 @@ class TestAscendW8A8LinearMethod(TestBase):
         self.assertEqual(params['weight_scale'].shape, (10, 1))
         self.assertEqual(params['weight_offset'].shape, (10, 1))
 
-    @patch("vllm_ascend.quantization.w8a8.get_weight_prefetch_method")
+    @patch("vllm_ascend.quantization.methods.w8a8_static.get_weight_prefetch_method")
     @patch("torch.ops.vllm.quantize")
     @patch("torch_npu.npu_quant_matmul")
     def test_apply_with_x_not_int8(self, mock_npu_quant_matmul, mock_quantize,

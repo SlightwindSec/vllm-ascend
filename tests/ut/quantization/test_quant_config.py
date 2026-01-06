@@ -7,7 +7,7 @@ from vllm.model_executor.layers.linear import LinearBase
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.quantization.quant_config import AscendQuantConfig
+from vllm_ascend.quantization.config import AscendQuantConfig
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 
@@ -82,7 +82,7 @@ class TestAscendQuantConfig(TestBase):
         mock_config.model_config.hf_config.model_type = None
         linear_layer = MagicMock(spec=LinearBase)
         # Test skipped layer
-        with patch("vllm_ascend.quantization.quant_config.get_current_vllm_config", return_value=mock_config), \
+        with patch("vllm_ascend.quantization.config.get_current_vllm_config", return_value=mock_config), \
             patch.object(self.ascend_config, \
                           'is_layer_skipped_ascend',
                           return_value=True):
@@ -91,8 +91,8 @@ class TestAscendQuantConfig(TestBase):
 
         # Test quantized layer
         with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=False), \
-            patch("vllm_ascend.quantization.quant_config.get_current_vllm_config", return_value=mock_config), \
-            patch('vllm_ascend.quantization.quant_config.AscendLinearMethod', return_value=MagicMock()) as mock_ascend_linear:
+            patch("vllm_ascend.quantization.config.get_current_vllm_config", return_value=mock_config), \
+            patch('vllm_ascend.quantization.config.AscendLinearMethod', return_value=MagicMock()) as mock_ascend_linear:
 
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
             self.assertIs(method, mock_ascend_linear.return_value)
@@ -104,8 +104,8 @@ class TestAscendQuantConfig(TestBase):
         attention_layer = MagicMock(spec=Attention)
         mock_config = MagicMock()
         mock_config.model_config.hf_config.model_type = None
-        with patch("vllm_ascend.quantization.quant_config.get_current_vllm_config", return_value=mock_config), \
-            patch('vllm_ascend.quantization.quant_config.AscendKVCacheMethod', \
+        with patch("vllm_ascend.quantization.config.get_current_vllm_config", return_value=mock_config), \
+            patch('vllm_ascend.quantization.config.AscendKVCacheMethod', \
                    return_value=MagicMock()) as mock_ascend_kvcache:
             # Test with fa_quant_type
             method = self.ascend_config.get_quant_method(
@@ -121,16 +121,16 @@ class TestAscendQuantConfig(TestBase):
 
         # Test skipped layer
         with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=True), \
-            patch("vllm_ascend.quantization.quant_config.get_current_vllm_config", return_value=mock_config), \
-            patch('vllm_ascend.quantization.quant_config.AscendUnquantizedFusedMoEMethod', return_value=MagicMock()) as mock_ascend_moe:
+            patch("vllm_ascend.quantization.config.get_current_vllm_config", return_value=mock_config), \
+            patch('vllm_ascend.quantization.config.AscendUnquantizedFusedMoEMethod', return_value=MagicMock()) as mock_ascend_moe:
             method = self.ascend_config.get_quant_method(
                 fused_moe_layer, "moe_layer")
             self.assertIs(method, mock_ascend_moe.return_value)
 
         # Test quantized layer
         with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=False), \
-            patch("vllm_ascend.quantization.quant_config.get_current_vllm_config", return_value=mock_config), \
-            patch('vllm_ascend.quantization.quant_config.AscendFusedMoEMethod', return_value=MagicMock()) as mock_ascend_moe:
+            patch("vllm_ascend.quantization.config.get_current_vllm_config", return_value=mock_config), \
+            patch('vllm_ascend.quantization.config.AscendFusedMoEMethod', return_value=MagicMock()) as mock_ascend_moe:
             method = self.ascend_config.get_quant_method(
                 fused_moe_layer, "moe_layer")
             self.assertIs(method, mock_ascend_moe.return_value)

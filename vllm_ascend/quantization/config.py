@@ -18,7 +18,7 @@
 """Quantization configuration classes for Ascend."""
 
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, cast
+from typing import Any, Dict, List, Mapping, Optional, cast
 
 import torch
 from vllm.config import get_current_vllm_config

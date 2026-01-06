@@ -363,7 +363,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             "communication_fn"] = otp_maybe_quant_comm
         actual_quant_method = getattr(self.quant_method, 'quant_method',
                                       self.quant_method)
-        from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
+        from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
         if not isinstance(actual_quant_method, AscendW8A8LinearMethod):
             # Check if w8a8 quantization is enabled. If not, communicate immediately.
             input_parallel = otp_maybe_quant_comm(input_parallel)
