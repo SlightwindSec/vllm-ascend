@@ -36,7 +36,7 @@ from vllm_ascend.ops.shared_weight_layer import (
     reach_layer_for_shared_weight_series,
     register_layer_to_shared_weight_series)
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
-from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
+from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND,
                                flashcomm2_o_shared_enabled, maybe_trans_nz,
                                weak_ref_tensors)

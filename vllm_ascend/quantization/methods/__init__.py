@@ -14,79 +14,62 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Ascend quantization module.
+"""Ascend quantization scheme implementations.
 
-This module provides quantization support for Ascend NPU, including:
-- Configuration classes (AscendQuantConfig, AscendCompressedTensorsConfig)
-- Wrapper classes (AscendLinearMethod, AscendFusedMoEMethod, etc.)
-- Scheme implementations (W8A8, W8A8_DYNAMIC, W4A8, W4A16, W4A4, etc.)
-- Model-specific mappings
+This module provides all quantization scheme implementations for Ascend NPU.
+Schemes are automatically registered via the @register_scheme decorator.
 
-Example usage:
-    from vllm_ascend.quantization import AscendQuantConfig
+Usage:
     from vllm_ascend.quantization.methods import get_scheme_class
     
-    # Get a scheme class
+    # Get a scheme class by quant_type and layer_type
     scheme_cls = get_scheme_class("W8A8_DYNAMIC", "linear")
+    scheme = scheme_cls()
 """
 
-# Import config classes
-from .config import AscendQuantConfig, AscendCompressedTensorsConfig
+# Import base classes
+from .base import AscendLinearScheme, AscendMoEScheme
 
-# Import wrapper classes
-from .wrappers import (
-    AscendLinearMethod,
-    AscendKVCacheMethod,
-    AscendFusedMoEMethod,
-    AscendEmbeddingMethod,
-)
-
-# Import model mappings
-from .model_mappings import (
-    packed_modules_model_mapping,
-    QUANT_MODEL_PREFIX_MAPPINGS,
-    get_packed_modules_mapping,
-    get_prefix_mapping,
-)
-
-# Import utility functions
-from .utils import (
-    get_quant_method,
-    get_linear_quant_type,
-    get_ascend_quantization_method_map,
-)
-
-# Re-export scheme classes for backward compatibility
-# These were previously in individual files at the quantization/ level
-from .methods import (
-    # Base classes
-    AscendLinearScheme,
-    AscendMoEScheme,
-    # Registry
-    register_scheme,
-    get_scheme_class,
-    list_supported_schemes,
+# Import registry functions
+from .registry import (
     build_quant_method_map,
-    # W8A8 static
-    AscendW8A8LinearMethod,
-    quant_per_tensor,
-    # W8A8 dynamic
+    get_scheme_class,
+    get_scheme_registry,
+    list_supported_schemes,
+    register_scheme,
+)
+
+# Import all scheme implementations to trigger registration
+# W8A8 schemes
+from .w8a8_static import AscendW8A8LinearMethod
+from .w8a8_dynamic import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8DynamicFusedMoEMethod,
     scale_from_float_to_int64,
-    # W8A8 PDMix
+)
+from .w8a8_pdmix import (
     AscendW8A8PDMixLinearMethod,
     AscendW8A8PDMixFusedMoeMethod,
-    # W8A16
-    AscendW8A16LinearMethod,
-    # W4A8
+)
+
+# W8A16 schemes
+from .w8a16 import AscendW8A16LinearMethod
+
+# W4A8 schemes
+from .w4a8 import (
     AscendW4A8DynamicLinearMethod,
     AscendW4A8DynamicFusedMoEMethod,
-    # W4A16
+)
+
+# W4A16 schemes
+from .w4a16 import (
     AscendW4A16FusedMoEMethod,
     pack_to_int32,
     unpack_from_int32,
-    # W4A4 FlatQuant
+)
+
+# W4A4 schemes
+from .w4a4_flatquant import (
     AscendW4A4FlatQuantDynamicLinearMethod,
     batched_kronecker_quant,
     get_decompose_dim,
@@ -94,46 +77,39 @@ from .methods import (
     KRONECKER_QUANT_MAX_BATCH_SIZE,
 )
 
+# Also import quant_per_tensor utility from w8a8_static
+from .w8a8_static import quant_per_tensor
+
 __all__ = [
-    # Config classes
-    "AscendQuantConfig",
-    "AscendCompressedTensorsConfig",
-    # Wrapper classes
-    "AscendLinearMethod",
-    "AscendKVCacheMethod",
-    "AscendFusedMoEMethod",
-    "AscendEmbeddingMethod",
-    # Model mappings
-    "packed_modules_model_mapping",
-    "QUANT_MODEL_PREFIX_MAPPINGS",
-    "get_packed_modules_mapping",
-    "get_prefix_mapping",
-    # Utility functions
-    "get_quant_method",
-    "get_linear_quant_type",
-    "get_ascend_quantization_method_map",
     # Base classes
     "AscendLinearScheme",
     "AscendMoEScheme",
-    # Registry
+    # Registry functions
     "register_scheme",
     "get_scheme_class",
     "list_supported_schemes",
+    "get_scheme_registry",
     "build_quant_method_map",
-    # Scheme implementations (for backward compatibility)
+    # W8A8 static
     "AscendW8A8LinearMethod",
     "quant_per_tensor",
+    # W8A8 dynamic
     "AscendW8A8DynamicLinearMethod",
     "AscendW8A8DynamicFusedMoEMethod",
     "scale_from_float_to_int64",
+    # W8A8 PDMix
     "AscendW8A8PDMixLinearMethod",
     "AscendW8A8PDMixFusedMoeMethod",
+    # W8A16
     "AscendW8A16LinearMethod",
+    # W4A8
     "AscendW4A8DynamicLinearMethod",
     "AscendW4A8DynamicFusedMoEMethod",
+    # W4A16
     "AscendW4A16FusedMoEMethod",
     "pack_to_int32",
     "unpack_from_int32",
+    # W4A4 FlatQuant
     "AscendW4A4FlatQuantDynamicLinearMethod",
     "batched_kronecker_quant",
     "get_decompose_dim",

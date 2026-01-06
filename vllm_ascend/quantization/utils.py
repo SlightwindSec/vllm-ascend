@@ -1,51 +1,43 @@
-from typing import Any, Dict, Optional, Type
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+from typing import Any, Dict, Optional
 
 import torch
 from vllm.logger import logger
 
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
-from .w4a4_flatquant_dynamic import AscendW4A4FlatQuantDynamicLinearMethod
-from .w4a8_dynamic import (AscendW4A8DynamicFusedMoEMethod,
-                           AscendW4A8DynamicLinearMethod)
-from .w4a16 import AscendW4A16FusedMoEMethod
-from .w8a8 import AscendW8A8LinearMethod
-from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
-                           AscendW8A8DynamicLinearMethod)
-from .w8a8_pdmix import (AscendW8A8PDMixFusedMoeMethod,
-                         AscendW8A8PDMixLinearMethod)
-from .w8a16 import AscendW8A16LinearMethod
-
-ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
-    "W4A16": {
-        "moe": AscendW4A16FusedMoEMethod,
-    },
-    "W4A8_DYNAMIC": {
-        "linear": AscendW4A8DynamicLinearMethod,
-        "moe": AscendW4A8DynamicFusedMoEMethod,
-    },
-    "W4A4_FLATQUANT_DYNAMIC": {
-        "linear": AscendW4A4FlatQuantDynamicLinearMethod,
-    },
-    "W8A8": {
-        "linear": AscendW8A8LinearMethod,
-    },
-    "W8A8_DYNAMIC": {
-        "linear": AscendW8A8DynamicLinearMethod,
-        "moe": AscendW8A8DynamicFusedMoEMethod,
-    },
-    "W8A8_MIX": {
-        "linear": AscendW8A8PDMixLinearMethod,
-        "moe": AscendW8A8PDMixFusedMoeMethod,
-    },
-    "W8A16": {
-        "linear": AscendW8A16LinearMethod,
-    }
-}
+# Import the registry and method map builder
+from .methods import build_quant_method_map, get_scheme_class
 
 
 def get_linear_quant_type(quant_description: Dict[str, Any], prefix: str,
-                          packed_modules_mapping: Dict[str, Any]):
+                          packed_modules_mapping: Dict[str, Any]) -> str:
+    """Determine the quantization type for a linear layer.
+    
+    Args:
+        quant_description: The quantization description dictionary.
+        prefix: The layer prefix.
+        packed_modules_mapping: Mapping for packed/fused modules.
+        
+    Returns:
+        The quantization type string (e.g., "W8A8_DYNAMIC").
+    """
     proj_name = prefix.split(".")[-1]
     if proj_name in packed_modules_mapping:
         quant_type = None
@@ -72,7 +64,19 @@ def get_quant_method(quant_description: Dict[str, Any],
                      prefix: str,
                      layer_type: str,
                      packed_modules_mapping: Optional[Dict[str, Any]] = None,
-                     layer: torch.nn.Module = None):
+                     layer: Optional[torch.nn.Module] = None):
+    """Get the appropriate quantization method for a layer.
+    
+    Args:
+        quant_description: The quantization description dictionary.
+        prefix: The layer prefix.
+        layer_type: The type of layer ("linear", "moe", "attention").
+        packed_modules_mapping: Mapping for packed/fused modules.
+        layer: The layer module (optional).
+        
+    Returns:
+        An instance of the appropriate quantization method class.
+    """
     if quant_description.get("quant_method") == COMPRESSED_TENSORS_METHOD:
         return get_quant_method_llmcompressor(layer)
 
@@ -81,6 +85,14 @@ def get_quant_method(quant_description: Dict[str, Any],
 
 
 def get_quant_method_llmcompressor(layer: torch.nn.Module):
+    """Get quantization method for LLM-Compressor models.
+    
+    Args:
+        layer: The layer module with a scheme attribute.
+        
+    Returns:
+        The scheme from the layer.
+    """
     logger.info_once("Using the vLLM Ascend llmcompressor Quantization now!")
     if layer.scheme is None:
         raise ValueError("A scheme must be defined for each layer")
@@ -92,6 +104,17 @@ def get_quant_method_modelslim(
         prefix: str,
         layer_type: str,
         packed_modules_mapping: Optional[Dict[str, Any]] = None):
+    """Get quantization method for ModelSlim models.
+    
+    Args:
+        quant_description: The quantization description dictionary.
+        prefix: The layer prefix.
+        layer_type: The type of layer ("linear", "moe", "attention").
+        packed_modules_mapping: Mapping for packed/fused modules.
+        
+    Returns:
+        An instance of the appropriate quantization method class.
+    """
     logger.info_once("Using the vLLM Ascend modelslim Quantization now!")
     if packed_modules_mapping is None:
         packed_modules_mapping = dict()
@@ -102,14 +125,36 @@ def get_quant_method_modelslim(
     else:
         quant_type = get_linear_quant_type(quant_description, prefix,
                                            packed_modules_mapping)
-    if quant_type in ASCEND_QUANTIZATION_METHOD_MAP.keys():
-        method_map = ASCEND_QUANTIZATION_METHOD_MAP[quant_type]
-        if layer_type in method_map.keys():
-            method_cls = method_map[layer_type]
-            return method_cls()
+
+    # Use registry to get scheme class
+    method_cls = get_scheme_class(quant_type, layer_type)
+    if method_cls is not None:
+        return method_cls()
+
+    # Fall back to method map for backward compatibility
+    method_map = build_quant_method_map()
+    if quant_type in method_map:
+        if layer_type in method_map[quant_type]:
+            return method_map[quant_type][layer_type]()
         else:
             raise NotImplementedError(
                 f"Currently, vLLM Ascend doesn't support {quant_type} for {layer_type}."
             )
-    raise NotImplementedError("Currently, vLLM Ascend only supports following quant types:" \
-                                f"{list(ASCEND_QUANTIZATION_METHOD_MAP.keys())}")
+    raise NotImplementedError(
+        f"Currently, vLLM Ascend only supports following quant types: "
+        f"{list(method_map.keys())}")
+
+
+# For backward compatibility, also export the method map
+def get_ascend_quantization_method_map() -> Dict[str, Dict[str, type]]:
+    """Get the quantization method map for backward compatibility.
+    
+    Returns:
+        Dictionary mapping quant_type -> {layer_type -> SchemeClass}.
+    """
+    return build_quant_method_map()
+
+
+# Alias for backward compatibility
+ASCEND_QUANTIZATION_METHOD_MAP = property(
+    lambda self: build_quant_method_map())

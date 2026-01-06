@@ -31,7 +31,7 @@ from vllm_ascend.ops.shared_weight_layer import (
     register_layer_to_shared_weight_series)
 from vllm_ascend.ops.triton.rope import rope_forward_triton
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
-from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
+from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, _round_up, dispose_layer,
                                enable_sp, maybe_trans_nz, replace_layer)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
