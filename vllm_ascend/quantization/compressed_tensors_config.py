@@ -20,8 +20,12 @@
 from typing import Any, Optional, cast
 
 import torch
+from compressed_tensors.quantization import (QuantizationArgs,
+                                             QuantizationStrategy)
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import (LinearBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import (
     QUANTIZATION_METHODS, register_quantization_config)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -32,8 +36,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.logger import init_logger
-from compressed_tensors.quantization import QuantizationStrategy, QuantizationArgs
 
 from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
@@ -49,7 +51,8 @@ def _remove_quantization_method():
 
 _remove_quantization_method()
 
-QUANTIZATION_SCHEME_MAP_TYPE = dict[str, Optional[dict[str, "QuantizationArgs"]]]
+QUANTIZATION_SCHEME_MAP_TYPE = dict[str, Optional[dict[str,
+                                                       "QuantizationArgs"]]]
 
 
 def get_quant_method_llmcompressor(layer: torch.nn.Module):
@@ -163,8 +166,8 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         layer: torch.nn.Module,
         prefix: str,
     ) -> Optional["QuantizeMethodBase"]:
-        from .wrappers import AscendLinearMethod, AscendFusedMoEMethod
         from .modelslim_config import AscendModelSlimConfig
+        from .wrappers import AscendFusedMoEMethod, AscendLinearMethod
 
         if isinstance(layer, LinearBase):
             layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
@@ -254,12 +257,10 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             self, weight_quant: "QuantizationArgs",
             input_quant: "QuantizationArgs") -> "CompressedTensorsScheme":
         """Determine the appropriate scheme based on quantization args."""
-        from .methods import (
-            AscendW8A8LinearMethod,
-            AscendW8A8DynamicLinearMethod,
-            AscendW4A16FusedMoEMethod,
-        )
-        
+        from .methods import (AscendW4A16FusedMoEMethod,
+                              AscendW8A8DynamicLinearMethod,
+                              AscendW8A8LinearMethod)
+
         act_quant_format = is_activation_quantization_format(self.quant_format)
         if act_quant_format and input_quant is not None:
             if self._is_static_tensor_w8a8(weight_quant, input_quant):

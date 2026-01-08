@@ -133,8 +133,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         except AttributeError:
             self.moe_all_to_all_group_name = ""
 
-    def get_weight(self, num_experts: int, intermediate_size_per_partition: int,
-                   hidden_sizes: int,
+    def get_weight(self, num_experts: int,
+                   intermediate_size_per_partition: int, hidden_sizes: int,
                    params_dtype: torch.dtype) -> Dict[str, Any]:
         param_dict = {}
         param_dict["w13_weight"] = torch.empty(num_experts,

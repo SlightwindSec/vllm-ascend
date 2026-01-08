@@ -124,8 +124,8 @@ class AscendMoEScheme(ABC):
     """
 
     @abstractmethod
-    def get_weight(self, num_experts: int, intermediate_size_per_partition: int,
-                   hidden_sizes: int,
+    def get_weight(self, num_experts: int,
+                   intermediate_size_per_partition: int, hidden_sizes: int,
                    params_dtype: torch.dtype) -> Dict[str, Any]:
         """Return weight tensor specifications for MoE layer.
         

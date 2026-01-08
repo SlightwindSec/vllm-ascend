@@ -27,11 +27,10 @@ Public API:
 - For scheme implementations, import from vllm_ascend.quantization.methods
 """
 
-# ModelSlim quantization config
-from .modelslim_config import AscendModelSlimConfig
-
 # LLM-Compressor (compressed_tensors) quantization config
 from .compressed_tensors_config import AscendCompressedTensorsConfig
+# ModelSlim quantization config
+from .modelslim_config import AscendModelSlimConfig
 
 __all__ = [
     "AscendModelSlimConfig",

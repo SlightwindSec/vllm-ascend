@@ -22,7 +22,8 @@ import torch
 from vllm.config import get_current_vllm_config
 
 from .registry import register_scheme
-from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
+from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
+                           AscendW8A8DynamicLinearMethod)
 from .w8a8_static import AscendW8A8LinearMethod
 
 

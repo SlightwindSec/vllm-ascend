@@ -25,7 +25,8 @@ from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                RowParallelLinear)
-from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.layers.quantization.base_config import \
+    QuantizeMethodBase
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
@@ -200,7 +201,8 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
         prefix: The layer prefix.
     """
 
-    def __init__(self, quant_config: "QuantizeMethodBase", prefix: str) -> None:
+    def __init__(self, quant_config: "QuantizeMethodBase",
+                 prefix: str) -> None:
         self.quant_method = get_quant_method(quant_config.quant_description,
                                              prefix, "attention")
 

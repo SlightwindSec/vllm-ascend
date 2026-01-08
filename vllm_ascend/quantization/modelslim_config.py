@@ -26,15 +26,16 @@ from typing import Any, Dict, List, Mapping, Optional
 
 import torch
 from vllm.config import get_current_vllm_config
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
-from vllm.model_executor.layers.quantization import register_quantization_config
+from vllm.model_executor.layers.quantization import \
+    register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod, VocabParallelEmbedding)
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.logger import init_logger
 
 from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
@@ -43,7 +44,6 @@ from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 from .methods import get_scheme_class
 
 logger = init_logger(__name__)
-
 
 # =============================================================================
 # Model Mappings for ModelSlim

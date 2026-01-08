@@ -4,7 +4,8 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.quantization.methods.w4a16 import (AscendW4A16FusedMoEMethod,
-                                                    pack_to_int32, unpack_from_int32)
+                                                    pack_to_int32,
+                                                    unpack_from_int32)
 
 
 class TestUnpackFromInt32(TestBase):

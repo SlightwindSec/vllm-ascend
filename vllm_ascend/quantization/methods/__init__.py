@@ -29,18 +29,18 @@ Usage:
 
 # Import base classes
 from .base import AscendLinearScheme, AscendMoEScheme
-
 # Import registry functions
 from .registry import get_scheme_class, register_scheme
-
-from .w8a8_static import AscendW8A8LinearMethod
-from .w8a8_dynamic import AscendW8A8DynamicLinearMethod, AscendW8A8DynamicFusedMoEMethod
-from .w8a8_pdmix import AscendW8A8PDMixLinearMethod, AscendW8A8PDMixFusedMoeMethod
-from .w8a16 import AscendW8A16LinearMethod
-from .w4a8 import AscendW4A8DynamicLinearMethod, AscendW4A8DynamicFusedMoEMethod
-from .w4a16 import AscendW4A16FusedMoEMethod
 from .w4a4_flatquant import AscendW4A4FlatQuantDynamicLinearMethod
-
+from .w4a8 import (AscendW4A8DynamicFusedMoEMethod,
+                   AscendW4A8DynamicLinearMethod)
+from .w4a16 import AscendW4A16FusedMoEMethod
+from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
+                           AscendW8A8DynamicLinearMethod)
+from .w8a8_pdmix import (AscendW8A8PDMixFusedMoeMethod,
+                         AscendW8A8PDMixLinearMethod)
+from .w8a8_static import AscendW8A8LinearMethod
+from .w8a16 import AscendW8A16LinearMethod
 
 __all__ = [
     # Base classes

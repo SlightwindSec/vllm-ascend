@@ -49,8 +49,7 @@ def register_scheme(quant_type: str, layer_type: str):
     return decorator
 
 
-def get_scheme_class(quant_type: str,
-                     layer_type: str) -> Optional[Type[Any]]:
+def get_scheme_class(quant_type: str, layer_type: str) -> Optional[Type[Any]]:
     """Get scheme class for given quant_type and layer_type.
     
     Args:
