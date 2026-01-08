@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, Optional, Tuple, Type
 
 # Registry: maps (quant_type, layer_type) -> SchemeClass
 _SCHEME_REGISTRY: Dict[Tuple[str, str], Type[Any]] = {}
@@ -61,36 +61,3 @@ def get_scheme_class(quant_type: str,
         The registered scheme class, or None if not found.
     """
     return _SCHEME_REGISTRY.get((quant_type, layer_type))
-
-
-def list_supported_schemes() -> List[Tuple[str, str]]:
-    """List all registered (quant_type, layer_type) combinations.
-    
-    Returns:
-        List of (quant_type, layer_type) tuples.
-    """
-    return list(_SCHEME_REGISTRY.keys())
-
-
-def get_scheme_registry() -> Dict[Tuple[str, str], Type[Any]]:
-    """Get the entire scheme registry.
-    
-    Returns:
-        Dictionary mapping (quant_type, layer_type) to scheme classes.
-    """
-    return _SCHEME_REGISTRY.copy()
-
-
-def build_quant_method_map() -> Dict[str, Dict[str, Type[Any]]]:
-    """Build a nested map from the registry for backward compatibility.
-    
-    Returns:
-        Dictionary mapping quant_type -> {layer_type -> SchemeClass}.
-        This format is compatible with ASCEND_QUANTIZATION_METHOD_MAP.
-    """
-    result: Dict[str, Dict[str, Type[Any]]] = {}
-    for (quant_type, layer_type), cls in _SCHEME_REGISTRY.items():
-        if quant_type not in result:
-            result[quant_type] = {}
-        result[quant_type][layer_type] = cls
-    return result

@@ -4,34 +4,8 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.quantization.methods.w8a8_static import (AscendW8A8LinearMethod,
-                                                          quant_per_tensor)
+from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
 from vllm_ascend.utils import AscendDeviceType
-
-
-class TestQuantPerTensor(TestBase):
-
-    @patch("torch_npu.npu_quantize")
-    def test_quant_per_tensor(self, mock_npu_quantize):
-        in_tensor = torch.randn(32, 128)
-        input_scale = torch.tensor(0.1)
-        input_offset = torch.tensor(0)
-
-        expected_output = torch.randint(-128, 127, (32, 128), dtype=torch.int8)
-        mock_npu_quantize.return_value = expected_output
-
-        output = quant_per_tensor(in_tensor, input_scale, input_offset)
-
-        mock_npu_quantize.assert_called_once_with(
-            in_tensor,
-            input_scale,
-            input_offset,
-            torch.qint8,
-            -1,
-            False,
-        )
-
-        self.assertTrue(torch.equal(output, expected_output))
 
 
 class TestAscendW8A8LinearMethod(TestBase):

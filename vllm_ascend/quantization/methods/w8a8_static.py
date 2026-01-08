@@ -29,15 +29,6 @@ from .base import AscendLinearScheme
 from .registry import register_scheme
 
 
-def quant_per_tensor(in_tensor: torch.Tensor,
-                     input_scale: torch.Tensor,
-                     input_offset: torch.Tensor,
-                     function=False):
-    """Quantize tensor using per-tensor scale and offset."""
-    return torch_npu.npu_quantize(in_tensor, input_scale, input_offset,
-                                  torch.qint8, -1, function)
-
-
 @register_scheme("W8A8", "linear")
 class AscendW8A8LinearMethod(AscendLinearScheme):
     """Linear method for Ascend W8A8 static quantization.

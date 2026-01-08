@@ -15,13 +15,11 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Quantization configuration classes for Ascend."""
+"""LLM-Compressor (compressed_tensors) quantization configuration for Ascend."""
 
-from types import MappingProxyType
-from typing import Any, Dict, List, Mapping, Optional, cast
+from typing import Any, Optional, cast
 
 import torch
-from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import (
@@ -33,156 +31,14 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import \
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod, VocabParallelEmbedding)
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.logger import init_logger
 from compressed_tensors.quantization import QuantizationStrategy, QuantizationArgs
 
 from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
-from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
-
-from .model_mappings import QUANT_MODEL_PREFIX_MAPPINGS, packed_modules_model_mapping
-from .wrappers import (AscendEmbeddingMethod, AscendFusedMoEMethod,
-                       AscendKVCacheMethod, AscendLinearMethod)
-
+from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
 logger = init_logger(__name__)
-
-
-@register_quantization_config(ASCEND_QUANTIZATION_METHOD)
-class AscendQuantConfig(QuantizationConfig):
-    """Config class for Ascend ModelSlim quantization.
-
-    This class is a general class that parses quantization configs
-    that are supported on Ascend hardware.
-    """
-
-    def __init__(self, quant_config: Dict[str, Any]):
-        super().__init__()
-        self.quant_description = quant_config
-        # TODO(whx): remove this adaptation after adding "shared_head"
-        # to prefix of DeepSeekShareHead in vLLM.
-        extra_quant_dict = {}
-        for k in self.quant_description.keys():
-            if "shared_head" in k:
-                new_k = k.replace(".shared_head.", ".")
-                extra_quant_dict[new_k] = self.quant_description[k]
-            if "weight_packed" in k:
-                new_k = k.replace("weight_packed", "weight")
-                extra_quant_dict[new_k] = self.quant_description[k]
-        self.quant_description.update(extra_quant_dict)
-
-    def __repr__(self) -> str:
-        return "AscendQuantConfig:\n" + super().__repr__()
-
-    @classmethod
-    def get_name(cls) -> str:
-        return ASCEND_QUANTIZATION_METHOD
-
-    @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.int8, torch.float16, torch.bfloat16]
-
-    @classmethod
-    def get_min_capability(cls) -> int:
-        raise NotImplementedError(
-            "Ascend hardware dose not support \"get_min_capability\" feature.")
-
-    @classmethod
-    def get_config_filenames(cls) -> List[str]:
-        return ["quant_model_description.json"]
-
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "AscendQuantConfig":
-        return cls(config)
-
-    @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
-        if hf_quant_cfg is not None:
-            quant_method = hf_quant_cfg.get("quant_method", None)
-            if not quant_method and torch.npu.is_available():
-                return ASCEND_QUANTIZATION_METHOD
-        return None
-
-    def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
-        # TODO (Levi-JQ): will be removed when QuantizationConfig.apply_vllm_mapper is implemented
-        prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
-        if prefix_mapping:
-            hf_to_vllm_mapper = WeightsMapper(
-                orig_to_new_prefix=prefix_mapping)
-            return hf_to_vllm_mapper._map_name(prefix)
-        return prefix
-
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["QuantizeMethodBase"]:
-        vllm_config = get_current_vllm_config()
-        model_type = vllm_config.model_config.hf_config.model_type
-        if model_type in packed_modules_model_mapping:
-            self.packed_modules_mapping = packed_modules_model_mapping[
-                model_type]
-        prefix = self.quant_prefix_mapper(model_type, prefix)
-        from vllm.attention.layer import Attention
-        if prefix.startswith("language_model"):
-            prefix = prefix.split('.', 1)[-1]
-        if isinstance(layer, LinearBase):
-            if self.is_layer_skipped_ascend(prefix,
-                                            self.packed_modules_mapping):
-                return AscendUnquantizedLinearMethod()
-            return AscendLinearMethod(self, prefix,
-                                      self.packed_modules_mapping, layer)
-        elif isinstance(layer, Attention) and \
-            'fa_quant_type' in self.quant_description.keys() and \
-            self.quant_description['fa_quant_type'] is not None:
-            return AscendKVCacheMethod(self, prefix)
-        elif isinstance(layer, FusedMoE):
-            if self.is_layer_skipped_ascend(prefix,
-                                            self.packed_modules_mapping):
-                return AscendUnquantizedFusedMoEMethod(layer.moe_config)
-            return AscendFusedMoEMethod(self, prefix,
-                                        self.packed_modules_mapping, layer)
-        elif isinstance(layer, VocabParallelEmbedding):
-            if self.is_layer_skipped_ascend(prefix,
-                                            self.packed_modules_mapping):
-                return UnquantizedEmbeddingMethod()
-            return AscendEmbeddingMethod(self, prefix,
-                                         self.packed_modules_mapping, layer)
-        return None
-
-    def is_layer_skipped_ascend(
-        self,
-        prefix: str,
-        fused_mapping: Mapping[str, List[str]] = MappingProxyType({})):
-        # adapted from vllm.model_executor.layers.quantization.utils.quant_utils.is_layer_skipped
-        proj_name = prefix.split(".")[-1]
-        if proj_name in fused_mapping:
-            shard_prefixes = [
-                prefix.replace(proj_name, shard_proj_name)
-                for shard_proj_name in fused_mapping[proj_name]
-            ]
-
-            is_skipped = None
-            for shard_prefix in shard_prefixes:
-                is_shard_skipped = self.quant_description[shard_prefix +
-                                                          '.weight'] == "FLOAT"
-
-                if is_skipped is None:
-                    is_skipped = is_shard_skipped
-                elif is_shard_skipped != is_skipped:
-                    raise ValueError(
-                        f"Detected some but not all shards of {prefix} "
-                        "are quantized. All shards of fused layers "
-                        "to have the same precision.")
-        else:
-            is_skipped = self.quant_description[prefix + '.weight'] == "FLOAT"
-
-        assert is_skipped is not None
-        return is_skipped
-
-    def get_scaled_act_names(self) -> List[str]:
-        return []
 
 
 # Remove the original compressed_tensors method to replace with our implementation
@@ -194,6 +50,21 @@ def _remove_quantization_method():
 _remove_quantization_method()
 
 QUANTIZATION_SCHEME_MAP_TYPE = dict[str, Optional[dict[str, "QuantizationArgs"]]]
+
+
+def get_quant_method_llmcompressor(layer: torch.nn.Module):
+    """Get quantization method for LLM-Compressor models.
+    
+    Args:
+        layer: The layer module with a scheme attribute.
+        
+    Returns:
+        The scheme from the layer.
+    """
+    logger.info_once("Using the vLLM Ascend llmcompressor Quantization now!")
+    if layer.scheme is None:
+        raise ValueError("A scheme must be defined for each layer")
+    return layer.scheme
 
 
 @register_quantization_config(COMPRESSED_TENSORS_METHOD)
@@ -292,6 +163,9 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         layer: torch.nn.Module,
         prefix: str,
     ) -> Optional["QuantizeMethodBase"]:
+        from .wrappers import AscendLinearMethod, AscendFusedMoEMethod
+        from .modelslim_config import AscendModelSlimConfig
+
         if isinstance(layer, LinearBase):
             layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
             # collect schemes
@@ -301,8 +175,8 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             quant_method = UnquantizedLinearMethod()
             if quant_scheme is not None:
                 layer.scheme = quant_scheme
-                ascend_quant_config = AscendQuantConfig(self.quant_description
-                                                        or {})
+                ascend_quant_config = AscendModelSlimConfig(
+                    self.quant_description or {})
                 quant_method = AscendLinearMethod(ascend_quant_config, prefix,
                                                   None, layer)
             return quant_method
@@ -315,8 +189,8 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             quant_method = AscendUnquantizedFusedMoEMethod(layer.moe_config)
             if quant_scheme is not None:
                 layer.scheme = quant_scheme
-                ascend_quant_config = AscendQuantConfig(self.quant_description
-                                                        or {})
+                ascend_quant_config = AscendModelSlimConfig(
+                    self.quant_description or {})
                 quant_method = AscendFusedMoEMethod(
                     ascend_quant_config, prefix,
                     ascend_quant_config.packed_modules_mapping, layer)

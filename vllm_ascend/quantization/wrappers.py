@@ -34,9 +34,37 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (get_flashcomm2_otp_group,
                                                     get_mlp_tp_group,
                                                     get_otp_group)
-from vllm_ascend.utils import flashcomm2_enable, mlp_tp_enable, oproj_tp_enable
+from vllm_ascend.utils import (COMPRESSED_TENSORS_METHOD, flashcomm2_enable,
+                               mlp_tp_enable, oproj_tp_enable)
 
-from .utils import get_quant_method
+
+def get_quant_method(quant_description: Dict[str, Any],
+                     prefix: str,
+                     layer_type: str,
+                     packed_modules_mapping: Optional[Dict[str, Any]] = None,
+                     layer: Optional[torch.nn.Module] = None):
+    """Get the appropriate quantization method for a layer.
+    
+    This is the routing function that dispatches to either ModelSlim or
+    LLM-Compressor implementations based on the quant_description.
+    
+    Args:
+        quant_description: The quantization description dictionary.
+        prefix: The layer prefix.
+        layer_type: The type of layer ("linear", "moe", "attention").
+        packed_modules_mapping: Mapping for packed/fused modules.
+        layer: The layer module (optional).
+        
+    Returns:
+        An instance of the appropriate quantization method class.
+    """
+    if quant_description.get("quant_method") == COMPRESSED_TENSORS_METHOD:
+        from .compressed_tensors_config import get_quant_method_llmcompressor
+        return get_quant_method_llmcompressor(layer)
+
+    from .modelslim_config import get_quant_method_modelslim
+    return get_quant_method_modelslim(quant_description, prefix, layer_type,
+                                      packed_modules_mapping)
 
 
 class AscendLinearMethod(LinearMethodBase):
