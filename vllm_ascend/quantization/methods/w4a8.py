@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""W4A8 dynamic quantization schemes for Ascend."""
 
 from typing import Any, Callable, Dict, Optional
 

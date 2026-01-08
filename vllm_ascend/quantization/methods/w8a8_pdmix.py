@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""W8A8 prefill-decode mix quantization schemes for Ascend."""
 
 from typing import Any, Dict, cast
 

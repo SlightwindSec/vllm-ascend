@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""W4A4 FlatQuant dynamic quantization scheme for Ascend."""
 
 import math
 from typing import Any, Dict, Optional, Tuple
