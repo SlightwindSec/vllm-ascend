@@ -176,6 +176,7 @@ class ExecuteModelState(NamedTuple):
     scheduler_output: "SchedulerOutput"
     logits: torch.Tensor
     spec_decode_metadata: SpecDecodeMetadata | None
+    spec_decode_common_attn_metadata: Optional[AscendCommonAttentionMetadata]
     hidden_states: torch.Tensor
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
@@ -1447,7 +1448,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> Union[ModelRunnerOutput, IntermediateTensors] | None:
+    ) -> ModelRunnerOutput | IntermediateTensors | None:
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called "
                                "after execute_model() returns None.")
@@ -1601,6 +1602,7 @@ class NPUModelRunner(GPUModelRunner):
                 scheduler_output,
                 logits,
                 spec_decode_metadata,
+                self.spec_decode_common_attn_metadata,
                 hidden_states,
                 sample_hidden_states,
                 aux_hidden_states,
@@ -1635,6 +1637,7 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output,
             logits,
             spec_decode_metadata,
+            spec_decode_common_attn_metadata,
             hidden_states,
             sample_hidden_states,
             aux_hidden_states,
@@ -1658,7 +1661,7 @@ class NPUModelRunner(GPUModelRunner):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         def propose_draft_token_ids(sampled_token_ids):
-            assert self.spec_decode_common_attn_metadata is not None
+            assert spec_decode_common_attn_metadata is not None
             self._draft_token_ids = self.propose_draft_token_ids(
                 sampled_token_ids,
                 self.input_batch.sampling_metadata,
@@ -2051,42 +2054,60 @@ class NPUModelRunner(GPUModelRunner):
     def _dummy_run(
         self,
         num_tokens: int,
-        with_prefill: bool = False,
         cudagraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
         uniform_decode: bool = False,
-        is_profile: bool = False,
         allow_microbatching: bool = True,
         skip_eplb: bool = False,
+        is_profile: bool = False,
+        create_mixed_batch: bool = False,
         remove_lora: bool = True,
         activate_lora: bool = False,
         is_graph_capturing: bool = False,
-    ) -> torch.Tensor:
-        # only support eager mode and piecewise graph now
-        assert cudagraph_runtime_mode is None or cudagraph_runtime_mode in {
-            CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
-        }
-        # In multi-DP scenarios, there may be situations where all DP groups are executing dummy runs.
-        # If sequence parallelism is enabled, it is essential to ensure that num_tokens is divisible by tp_size.
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Run a dummy forward pass to warm up/profile run or capture the
+        ACL graph for the model.
+
+        Args:
+            num_tokens: Number of tokens to run the dummy forward pass.
+            cudagraph_runtime_mode: used to control the behavior.
+                - if not set will determine the cudagraph mode based on using
+                    the self.cudagraph_dispatcher.
+                - CUDAGraphMode.NONE: No cudagraph, for warm up and profile run
+                - CUDAGraphMode.PIECEWISE: Piecewise cudagraph.
+                - CUDAGraphMode.FULL: Full cudagraph, attention metadata is
+                    needed.
+            force_attention: If True, always create attention metadata. Used to
+                warm up attention backend when mode is NONE.
+            uniform_decode: If True, the batch is a uniform decode batch.
+            allow_microbatching: If True, allow microbatching.
+            skip_eplb: If True, skip EPLB state update.
+            is_profile: If True, this is a profile run.
+            create_mixed_batch: If True, create a mixed batch with both decode
+                (1 token) and prefill (multiple tokens) requests.
+                NOTE: Currently not supported on Ascend.
+            remove_lora: If False, dummy LoRAs are not destroyed after the run.
+            activate_lora: If False, dummy_run is performed without LoRAs.
+            is_graph_capturing: If True, this is a graph capturing run.
+        """
+        # Only support eager mode and piecewise graph now
+        assert (
+            cudagraph_runtime_mode is None
+            or cudagraph_runtime_mode in {
+                CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
+            }
+        )
+
+        # In multi-DP scenarios, there may be situations where all DP groups
+        # are executing dummy runs. If sequence parallelism is enabled, it is
+        # essential to ensure that num_tokens is divisible by tp_size.
         if self.use_aclgraph and enable_sp(self.vllm_config):
             tp_size = self.vllm_config.parallel_config.tensor_parallel_size
             num_tokens = math.ceil(num_tokens / tp_size) * tp_size
 
-        # Force dummy run on prefill stage when this node is deemed as kv producer.
-        if self.is_kv_producer and not self.is_kv_consumer:
-            with_prefill = True
-
-        has_lora = True if self.lora_config and self.compilation_config.cudagraph_specialize_lora else False
-        _ag_mode, batch_descriptor = \
-            self.cudagraph_dispatcher.dispatch(num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora)
-
-        # Padding for DP
-        (num_tokens, num_tokens_across_dp,
-         with_prefill) = self._sync_metadata_across_dp(
-             batch_descriptor.num_tokens, with_prefill)
-
         # If cudagraph_mode.decode_mode() == FULL and
-        # cudagraph_mode.seperate_routine(). This means that we are using
+        # cudagraph_mode.separate_routine(). This means that we are using
         # different graphs and/or modes for mixed prefill-decode batches vs.
         # uniform decode batches. A uniform decode batch means that all
         # requests have identical query length, except a potential virtual
@@ -2098,34 +2119,68 @@ class NPUModelRunner(GPUModelRunner):
         # When setting max_query_len = 1, we switch to and capture the optimized
         # routine of FA2 for pure decode, i.e., Flashdecode + an optimization
         # for GQA/MQA.
-        max_query_len = self.uniform_decode_query_len if uniform_decode else \
-                                                                num_tokens
+        max_query_len = (
+            self.uniform_decode_query_len if uniform_decode else num_tokens
+        )
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.max_num_reqs
-        if uniform_decode:
-            num_reqs = cdiv(num_tokens, max_query_len)
+
+        # NOTE: create_mixed_batch is not supported on Ascend yet.
+        # The following logic matches GPU version structure for consistency.
+        if create_mixed_batch:
+            assert not uniform_decode
+            # Create mixed batch:
+            # first half decode tokens, second half one prefill
+            num_decode_tokens = min(max_num_reqs - 1, num_tokens // 2)
+            num_prefill_tokens = num_tokens - num_decode_tokens
+            num_reqs = num_decode_tokens + 1
+
+            # Create decode requests (1 token each) followed by prefill request
+            num_scheduled_tokens_list = [1] * num_decode_tokens + [num_prefill_tokens]
+            # Note: Overriding max_query_len to be the prefill tokens
+            max_query_len = num_prefill_tokens
+            with_prefill = True
+        elif uniform_decode:
+            assert not create_mixed_batch
+            num_reqs = min(max_num_reqs, cdiv(num_tokens, max_query_len))
             num_scheduled_tokens_list = [max_query_len] * num_reqs
             if num_tokens % max_query_len != 0:
                 num_scheduled_tokens_list[-1] = num_tokens % max_query_len
+            with_prefill = False
         else:
-            if with_prefill:
-                num_reqs = num_tokens
-            else:
-                num_reqs = (num_tokens + self.decode_token_per_req -
-                            1) // self.decode_token_per_req
-            num_reqs = min(num_reqs, max_num_reqs)
+            num_reqs = min(num_tokens, max_num_reqs)
             min_tokens_per_req = num_tokens // num_reqs
             num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
             num_scheduled_tokens_list[-1] += num_tokens % num_reqs
+            # Force dummy run on prefill stage when this node is deemed as kv producer.
+            with_prefill = self.is_kv_producer and not self.is_kv_consumer
+
         assert sum(num_scheduled_tokens_list) == num_tokens
         assert len(num_scheduled_tokens_list) == num_reqs
-        num_scheduled_tokens = np.array(num_scheduled_tokens_list,
-                                        dtype=np.int32)
+        num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
+        num_tokens_unpadded = int(num_scheduled_tokens.sum())
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
+
+        # Determine batch execution and padding
+        has_lora = (
+            True if self.lora_config and
+            self.compilation_config.cudagraph_specialize_lora else False
+        )
+        _ag_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
+            num_tokens=num_tokens,
+            uniform_decode=uniform_decode,
+            has_lora=has_lora,
+        )
+
+        # Padding for DP
+        (num_tokens, num_tokens_across_dp,
+         with_prefill) = self._sync_metadata_across_dp(
+            batch_descriptor.num_tokens, with_prefill
+        )
 
         if not is_profile and self.dynamic_eplb:
             self.eplb_updator.forward_before()
@@ -2134,31 +2189,40 @@ class NPUModelRunner(GPUModelRunner):
             _ag_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 uniform_decode=uniform_decode,
-                has_lora=has_lora)
+                has_lora=has_lora,
+            )
 
         num_tokens_padded = batch_descriptor.num_tokens
-        num_reqs_padded = (batch_descriptor.num_reqs if
-                           batch_descriptor.num_reqs is not None else num_reqs)
+        num_reqs_padded = (
+            batch_descriptor.num_reqs
+            if batch_descriptor.num_reqs is not None
+            else num_reqs
+        )
+
         if num_tokens_across_dp is not None and num_tokens_padded != num_tokens:
-            # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
+            # Pad is needed if the pad of `num_tokens` is triggered inside
+            # CudagraphDispatcher
             num_tokens_across_dp[:] = num_tokens_padded
             num_scheduled_tokens = num_scheduled_tokens.repeat(num_reqs_padded)
 
-        # filter out the valid batch descriptor
+        # Filter out the valid batch descriptor
         if cudagraph_runtime_mode is not None:
-            # we allow forcing NONE when the dispatcher disagrees to support
+            # We allow forcing NONE when the dispatcher disagrees to support
             # warm ups for aclgraph capture
-            if cudagraph_runtime_mode != CUDAGraphMode.NONE and cudagraph_runtime_mode != _ag_mode:
+            if (
+                cudagraph_runtime_mode != CUDAGraphMode.NONE
+                and cudagraph_runtime_mode != _ag_mode
+            ):
                 raise ValueError(
                     f"Aclgraph runtime mode mismatch at dummy_run. "
-                    f"Expected {_ag_mode}, but got {cudagraph_runtime_mode}.")
+                    f"Expected {_ag_mode}, but got {cudagraph_runtime_mode}."
+                )
         else:
             cudagraph_runtime_mode = _ag_mode
 
-        # TODO(Mengqing): Set create_mixed_batch to False since it's only used in FI warmup
-        # and not supported in ASCEND now. We could remove it in the future.
+        # Build attention metadata
         attn_metadata = self._build_dummy_attn_metadata(
-            False,
+            with_prefill=create_mixed_batch,
             num_reqs=num_reqs_padded,
             num_tokens=num_tokens_padded,
             max_query_len=max_query_len,
@@ -2167,11 +2231,15 @@ class NPUModelRunner(GPUModelRunner):
             num_scheduled_tokens=num_scheduled_tokens,
         )
 
-        with self.maybe_dummy_run_with_lora(self.lora_config,
-                                            num_scheduled_tokens,
-                                            num_sampled_tokens):
+        with self.maybe_dummy_run_with_lora(
+            self.lora_config,
+            num_scheduled_tokens,
+            num_sampled_tokens,
+        ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
+
+            # Prepare input_ids and inputs_embeds
             if self.is_multimodal_model and not self.model_config.is_encoder_decoder:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
@@ -2182,6 +2250,7 @@ class NPUModelRunner(GPUModelRunner):
                 input_ids = self.input_ids.gpu[:num_tokens_padded]
                 inputs_embeds = None
 
+            # Prepare positions
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]
             elif self.uses_xdrope_dim > 0:
@@ -2189,14 +2258,18 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 positions = self.positions.gpu[:num_tokens_padded]
 
-            # update global cos, sin
+            # Update global cos, sin
             update_cos_sin(positions)
 
+            # Prepare intermediate tensors for PP
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
             else:
-                # When PP and flashcomm1 are enabled, during dummy_run the estimated space should divide num_tokens by tp_size;
-                # otherwise, on non-first PP ranks it would effectively perform an extra all-gather, leading to incorrect memory estimation and potentially causing OOM.
+                # When PP and flashcomm1 are enabled, during dummy_run the
+                # estimated space should divide num_tokens by tp_size;
+                # otherwise, on non-first PP ranks it would effectively perform
+                # an extra all-gather, leading to incorrect memory estimation
+                # and potentially causing OOM.
                 actual_tokens = num_tokens
                 if enable_sp():
                     tp_size = get_tensor_model_parallel_world_size()
@@ -2206,17 +2279,20 @@ class NPUModelRunner(GPUModelRunner):
                         self.model.make_empty_intermediate_tensors(
                             batch_size=actual_tokens,
                             dtype=self.dtype,
-                            device=self.device))
+                            device=self.device,
+                        )
+                    )
                 intermediate_tensors = IntermediateTensors({
-                    k:
-                    v[:num_tokens_padded]
+                    k: v[:num_tokens_padded]
                     for k, v in self.intermediate_tensors.items()
                 })
 
-            need_dummy_logits = (not is_profile and lmhead_tp_enable())
+            # Prepare dummy logits computation
+            need_dummy_logits = not is_profile and lmhead_tp_enable()
             max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
-            dummy_indices = torch.zeros(max_num_reqs_across_dp,
-                                        dtype=torch.int32)
+            dummy_indices = torch.zeros(
+                max_num_reqs_across_dp, dtype=torch.int32
+            )
 
             def dummy_compute_logits(hidden_states):
                 if not need_dummy_logits:
@@ -2227,25 +2303,34 @@ class NPUModelRunner(GPUModelRunner):
                 if not need_dummy_logits or self.drafter is None:
                     return
                 if hasattr(self.drafter, "model") and hasattr(
-                        self.drafter.model, "compute_logits"):
+                    self.drafter.model, "compute_logits"
+                ):
                     return self.drafter.model.compute_logits(
-                        hidden_states[dummy_indices])
+                        hidden_states[dummy_indices]
+                    )
 
+            # Run forward pass
             with set_ascend_forward_context(
-                    attn_metadata,
-                    self.vllm_config,
-                    num_tokens=num_tokens_padded,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    in_profile_run=is_profile,
-                    num_actual_tokens=0,
-                    aclgraph_runtime_mode=cudagraph_runtime_mode,
-                    batch_descriptor=batch_descriptor,
-                    model_instance=self.model):
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=num_tokens_padded,
+                num_tokens_across_dp=num_tokens_across_dp,
+                in_profile_run=is_profile,
+                num_actual_tokens=0,
+                aclgraph_runtime_mode=cudagraph_runtime_mode,
+                batch_descriptor=batch_descriptor,
+                model_instance=self.model,
+            ):
                 hidden_states = self._generate_dummy_run_hidden_states(
-                    input_ids, positions, num_tokens_padded,
-                    intermediate_tensors, inputs_embeds)
+                    input_ids,
+                    positions,
+                    num_tokens_padded,
+                    intermediate_tensors,
+                    inputs_embeds,
+                )
                 dummy_compute_logits(hidden_states)
 
+            # Run drafter dummy if available
             if self.drafter:
                 self.drafter.dummy_run(
                     num_tokens=num_tokens_padded,
@@ -2256,48 +2341,116 @@ class NPUModelRunner(GPUModelRunner):
                     batch_descriptor=batch_descriptor,
                     dummy_compute_logits=dummy_drafter_compute_logits,
                     in_graph_capturing=not force_attention,
-                    is_profile=is_profile)
-            if is_profile and self.dynamic_eplb:
-                self.model.clear_all_moe_loads()
-            if not is_profile and self.dynamic_eplb:
-                self.eplb_updator.take_update_info_from_eplb_process()
-                self.eplb_updator.forward_end()
-            return hidden_states, hidden_states
+                    is_profile=is_profile,
+                )
+
+        # Handle EPLB
+        if is_profile and self.dynamic_eplb:
+            self.model.clear_all_moe_loads()
+        if not is_profile and self.dynamic_eplb:
+            self.eplb_updator.take_update_info_from_eplb_process()
+            self.eplb_updator.forward_end()
+
+        # Compute logit indices and return hidden states
+        logit_indices = np.cumsum(num_scheduled_tokens) - 1
+        logit_indices_device = torch.from_numpy(logit_indices).to(
+            self.device, non_blocking=True
+        )
+        return hidden_states, hidden_states[logit_indices_device]
 
     @torch.inference_mode()
     def _dummy_sampler_run(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        output = None
+        """
+        Run a dummy sampler pass to warm up the sampler.
 
-        # For profile, have maximum num_reqs and that collectively have
-        # maximum num_tokens.
-        min_tokens_per_req = self.max_num_tokens // self.max_num_reqs
-        num_scheduled_tokens_list = [min_tokens_per_req] * self.max_num_reqs
-        num_scheduled_tokens_list[
-            -1] += self.max_num_tokens % self.max_num_reqs
-        num_scheduled_tokens = np.array(num_scheduled_tokens_list,
-                                        dtype=np.int32)
-        logit_indices = np.cumsum(num_scheduled_tokens) - 1
-        # TODO: need to rum a dummy sampler for generate task
+        The dummy hidden states may contain special values, like `inf` or `nan`.
+        To avoid breaking the sampler, we use a random tensor here instead.
+        """
         # Sometimes, after the model is compiled through the AOT backend,
         # the model output may become a list containing only one Tensor object.
         if isinstance(hidden_states, list) and \
             len(hidden_states) == 1 and \
             isinstance(hidden_states[0], torch.Tensor):
             hidden_states = hidden_states[0]
-            hidden_states = hidden_states[logit_indices]
-            output = self.model.compute_logits(hidden_states)
-        return output
+
+        # Use random tensor to avoid special values breaking the sampler
+        hidden_states = torch.rand_like(hidden_states)
+
+        logits = self.model.compute_logits(hidden_states)
+        num_reqs = logits.size(0)
+
+        def dummy_tensors(v):
+            return torch.full((num_reqs,), v, device=self.device)
+
+        dummy_metadata = SamplingMetadata(
+            temperature=dummy_tensors(0.5),
+            all_greedy=False,
+            all_random=False,
+            top_p=dummy_tensors(0.9),
+            top_k=dummy_tensors(logits.size(1) - 1),
+            generators={},
+            max_num_logprobs=None,
+            no_penalties=True,
+            prompt_token_ids=None,
+            frequency_penalties=dummy_tensors(0.1),
+            presence_penalties=dummy_tensors(0.1),
+            repetition_penalties=dummy_tensors(0.1),
+            output_token_ids=[[] for _ in range(num_reqs)],
+            spec_token_ids=[[] for _ in range(num_reqs)],
+            allowed_token_ids_mask=None,
+            bad_words_token_ids={},
+            logitsprocs=build_logitsprocs(
+                self.vllm_config, self.device, self.pin_memory,
+                self.is_pooling_model,
+                self.vllm_config.model_config.logits_processors),
+        )
+
+        try:
+            sampler_output = self.sampler(
+                logits=logits, sampling_metadata=dummy_metadata
+            )
+        except RuntimeError as e:
+            if "out of memory" in str(e):
+                raise RuntimeError(
+                    "NPU out of memory occurred when warming up sampler with "
+                    f"{num_reqs} dummy requests. Please try lowering "
+                    "`max_num_seqs` or `gpu_memory_utilization` when "
+                    "initializing the engine."
+                ) from e
+            else:
+                raise e
+
+        if self.speculative_config:
+            draft_token_ids = [[0] for _ in range(num_reqs)]
+            dummy_spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+                draft_token_ids, self.device
+            )
+
+            num_tokens = sum(len(ids) for ids in draft_token_ids)
+            draft_probs = None
+            logits = torch.randn(
+                num_tokens + num_reqs,
+                logits.shape[-1],
+                device=self.device,
+                dtype=logits.dtype,
+            )
+            self.rejection_sampler(
+                dummy_spec_decode_metadata,
+                draft_probs,
+                logits,
+                dummy_metadata,
+            )
+
+        return sampler_output
 
     def profile_run(self) -> None:
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         if self.max_num_tokens > mc2_tokens_capacity and \
             select_moe_comm_method(mc2_tokens_capacity, self.vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
-            self._dummy_run(mc2_tokens_capacity,
-                            with_prefill=True,
-                            is_profile=True)
+            self._dummy_run(mc2_tokens_capacity, is_profile=True)
         origin_max_num_tokens = self.max_num_tokens
         # in the pcp scenario, the split sequence needs to be used for profile run
         # TODO: after the vllm pcp function is launched, this logic needs to be brought up to the community
