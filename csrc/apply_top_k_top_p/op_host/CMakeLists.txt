@@ -14,9 +14,13 @@ add_ops_compile_options(
                 -Werror
 )
 
+# 将 def 文件添加到 op_host_aclnnExc，用于生成 proto 等文件
+# 使用 Exc（Exclude）是因为已经有手动编写的 aclnn 实现，不需要自动生成
+target_sources(op_host_aclnnExc PRIVATE
+        apply_top_k_top_p_with_sorted_def.cpp
+)
 
 target_sources(opapi PRIVATE
-        apply_top_k_top_p_with_sorted_def.cpp
         apply_top_k_top_p_with_sorted.cpp
         aclnn_apply_top_k_top_p.cpp
 )
