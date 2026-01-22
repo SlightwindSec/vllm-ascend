@@ -14,8 +14,6 @@ add_ops_compile_options(
                 -Werror
 )
 
-# 将 def 文件添加到 op_host_aclnnExc，用于生成 proto 等文件
-# 使用 Exc（Exclude）是因为已经有手动编写的 aclnn 实现，不需要自动生成
 target_sources(op_host_aclnnExc PRIVATE
         apply_top_k_top_p_with_sorted_def.cpp
 )
@@ -47,9 +45,6 @@ target_include_directories(optiling PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_sources(opsproto PRIVATE
-        apply_top_k_top_p_with_sorted_infershape.cpp
-)
 
 file(GLOB _GMM_Aclnn_header "${CMAKE_CURRENT_SOURCE_DIR}/aclnn_apply_top_k_top_p.h")
 
