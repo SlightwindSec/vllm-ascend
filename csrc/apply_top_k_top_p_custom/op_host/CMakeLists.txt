@@ -45,6 +45,7 @@ target_include_directories(optiling PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+target_sources(opsproto PRIVATE)
 
 file(GLOB _GMM_Aclnn_header "${CMAKE_CURRENT_SOURCE_DIR}/aclnn_apply_top_k_top_p.h")
 
