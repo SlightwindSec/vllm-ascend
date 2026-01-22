@@ -9,11 +9,11 @@
  */
 
 /*!
- * \file aclnn_apply_top_k_top_p.cpp
+ * \file aclnn_apply_top_k_top_p_custom.cpp
  * \brief Custom implementation of ApplyTopKTopP operator to avoid name conflict with CANN built-in operator.
  */
-#include "aclnn_apply_top_k_top_p.h"
-#include "apply_top_k_top_p_with_sorted.h"
+#include "aclnn_apply_top_k_top_p_custom.h"
+#include "apply_top_k_top_p_custom.h"
 #include "sort.h"
 #include "aclnn_kernels/contiguous.h"
 #include "aclnn_kernels/common/op_error_check.h"
@@ -208,4 +208,3 @@ aclnnStatus aclnnApplyTopKTopPCustom(void* workspace, uint64_t workspaceSize, ac
 #ifdef __cplusplus
 }
 #endif
-

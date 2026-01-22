@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file apply_top_k_top_p_with_sorted_def.cpp
+ * \file apply_top_k_top_p_custom_def.cpp
  * \brief Custom operator definition for ApplyTopKTopPWithSortedCustom to avoid name conflict with CANN built-in.
  */
 #include "register/op_def_registry.h"

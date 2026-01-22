@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file apply_top_k_top_p_with_sorted_custom_infershape.cpp
+ * \file apply_top_k_top_p_custom_infershape.cpp
  * \brief ApplyTopKTopPWithSortedCustom 算子的形状推导和数据类型推导实现
  */
 #include "register/op_impl_registry.h"

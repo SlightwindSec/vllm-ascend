@@ -9,10 +9,10 @@
  */
 
 /*!
- * \file apply_top_k_top_p_with_sorted.cpp
+ * \file apply_top_k_top_p_custom.cpp
  * \brief Custom l0op implementation for ApplyTopKTopPWithSortedCustom operator.
  */
-#include "apply_top_k_top_p_with_sorted.h"
+#include "apply_top_k_top_p_custom.h"
 #include "opdev/data_type_utils.h"
 #include "opdev/format_utils.h"
 #include "opdev/make_op_executor.h"

@@ -9,11 +9,11 @@
  */
 
 /*!
- * \file apply_top_k_top_p_with_sorted.h
+ * \file apply_top_k_top_p_custom.h
  * \brief Custom l0op function declaration for ApplyTopKTopPWithSortedCustom operator.
  */
-#ifndef OP_API_INC_LEVEL0_OP_APPLY_TOP_K_TOP_P_WITH_SORTED_CUSTOM_OP_H_
-#define OP_API_INC_LEVEL0_OP_APPLY_TOP_K_TOP_P_WITH_SORTED_CUSTOM_OP_H_
+#ifndef OP_API_INC_LEVEL0_OP_APPLY_TOP_K_TOP_P_CUSTOM_H_
+#define OP_API_INC_LEVEL0_OP_APPLY_TOP_K_TOP_P_CUSTOM_H_
 
 #include "opdev/op_executor.h"
 
@@ -21,5 +21,4 @@ namespace l0op {
 const aclTensor* ApplyTopKTopPWithSortedCustom(const aclTensor* sortedValue, const aclTensor* sortedIndices,
                                          const aclTensor* p, const aclTensor* k, aclOpExecutor* executor);
 }
-#endif // OP_API_INC_LEVEL0_OP_APPLY_TOP_K_TOP_P_WITH_SORTED_CUSTOM_OP_H_
-
+#endif // OP_API_INC_LEVEL0_OP_APPLY_TOP_K_TOP_P_CUSTOM_H_

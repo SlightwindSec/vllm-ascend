@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file apply_top_k_top_p_with_sorted_tiling.cpp
+ * \file apply_top_k_top_p_custom_tiling.cpp
  * \brief Custom tiling implementation for ApplyTopKTopPWithSortedCustom operator.
  */
 
@@ -21,7 +21,7 @@
 #include "register/op_def_registry.h"
 #include "register/op_impl_registry.h"
 #include "tiling/tiling_api.h"
-#include "apply_top_k_top_p_with_sorted_tiling.h"
+#include "apply_top_k_top_p_custom_tiling.h"
 
 namespace {
     constexpr uint32_t SYS_RESERVED_UB = uint32_t(16 * 1024);

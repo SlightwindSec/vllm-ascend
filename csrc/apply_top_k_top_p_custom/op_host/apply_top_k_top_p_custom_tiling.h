@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file apply_top_k_top_p_with_sorted_tiling.h
+ * \file apply_top_k_top_p_custom_tiling.h
  * \brief Custom tiling data definition for ApplyTopKTopPWithSortedCustom operator.
  * ATTENTION: MAKE SURE 'BEGIN_TILING_DATA_DEF' STAY IN THE SAME LINE (28) USING BLANK LINES.
  * 
@@ -18,8 +18,8 @@
  * 
  * 
  */
-#ifndef __APPLY_TOP_K_TOP_P_WITH_SORTED_CUSTOM_TILINGDATA_H__
-#define __APPLY_TOP_K_TOP_P_WITH_SORTED_CUSTOM_TILINGDATA_H__
+#ifndef __APPLY_TOP_K_TOP_P_CUSTOM_TILINGDATA_H__
+#define __APPLY_TOP_K_TOP_P_CUSTOM_TILINGDATA_H__
 
 #include "register/tilingdata_base.h"
 
@@ -48,4 +48,4 @@ struct TilingForApplyTopKTopPWithSortedCustomCompileInfo {
 };
 
 }  // namespace optiling
-#endif  // __APPLY_TOP_K_TOP_P_WITH_SORTED_CUSTOM_TILINGDATA_H__
+#endif  // __APPLY_TOP_K_TOP_P_CUSTOM_TILINGDATA_H__

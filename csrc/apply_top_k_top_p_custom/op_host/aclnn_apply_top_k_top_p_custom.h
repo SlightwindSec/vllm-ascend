@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file aclnn_apply_top_k_top_p.h
+ * \file aclnn_apply_top_k_top_p_custom.h
  * \brief Custom implementation of ApplyTopKTopP operator to avoid name conflict with CANN built-in operator.
  */
 #ifndef OP_API_INC_APPLY_TOP_K_TOP_P_CUSTOM_H_
