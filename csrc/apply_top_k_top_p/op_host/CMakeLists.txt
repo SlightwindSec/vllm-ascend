@@ -48,7 +48,7 @@ target_include_directories(optiling PRIVATE
 )
 
 target_sources(opsproto PRIVATE
-        apply_top_k_top_p_with_sorted_proto.cpp
+        apply_top_k_top_p_with_sorted_infershape.cpp
 )
 
 file(GLOB _GMM_Aclnn_header "${CMAKE_CURRENT_SOURCE_DIR}/aclnn_apply_top_k_top_p.h")
