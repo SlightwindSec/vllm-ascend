@@ -14,28 +14,35 @@ add_ops_compile_options(
                 -Werror
 )
 
-# 使用 op_host_aclnn 目标，参考 moe_gating_top_k 的配置
-# 这样可以避免自动生成 proto 文件的问题
+# 本算子有两层结构：
+# 1. 底层 kernel: ApplyTopKTopPWithSortedCustom (处理已排序的输入)
+# 2. 顶层 aclnn API: aclnnApplyTopKTopPCustom (先排序再调用底层 kernel)
+#
+# 因为我们手动提供了 aclnn 实现（包含排序逻辑），所以不能使用 op_host_aclnn 目标
+# （op_host_aclnn 会触发自动生成 aclnn 文件，与我们手动提供的文件冲突）
+# 
+# 将 def 文件直接添加到 opsproto 目标，避免触发自动生成
+
 if (BUILD_OPEN_PROJECT)
-    target_sources(op_host_aclnn PRIVATE
+    # 算子定义和形状推导 - 添加到 opsproto
+    target_sources(opsproto PRIVATE
             apply_top_k_top_p_with_sorted_def.cpp
+            apply_top_k_top_p_with_sorted_custom_infershape.cpp
     )
 
+    # 手动提供的 aclnn 实现和 l0op 实现 - 添加到 opapi
     target_sources(opapi PRIVATE
             apply_top_k_top_p_with_sorted.cpp
             aclnn_apply_top_k_top_p.cpp
     )
 
+    # Tiling 实现
     target_sources(optiling PRIVATE
             apply_top_k_top_p_with_sorted_tiling.cpp
     )
 
     target_include_directories(optiling PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}
-    )
-
-    target_sources(opsproto PRIVATE
-            apply_top_k_top_p_with_sorted_custom_infershape.cpp
     )
 
     file(GLOB _GMM_Aclnn_header "${CMAKE_CURRENT_SOURCE_DIR}/aclnn_apply_top_k_top_p.h")
