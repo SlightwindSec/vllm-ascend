@@ -51,6 +51,11 @@ QUANT_MODEL_PREFIX_MAPPINGS: Dict[str, Dict[str, str]] = {
         "language_model.lm_head.": "lm_head.",
         "language_model.model.": "model.language_model.",
     },
+    "qwen3_vl_text": {
+        "visual.": "model.visual.",
+        "language_model.lm_head.": "lm_head.",
+        "language_model.model.": "model.language_model.",
+    },
 }
 
 # key: model_type
@@ -206,22 +211,16 @@ def get_prefix_mapping(model_type: str) -> Dict[str, str]:
 
 def get_linear_quant_type(
         quant_description: Dict[str, Any], prefix: str,
-        packed_modules_mapping: Dict[str, Any],
-        default_quant_type: Optional[str] = None) -> Optional[str]:
+        packed_modules_mapping: Dict[str, Any]) -> Optional[str]:
     """Determine the quantization type for a linear layer.
-    
-    Supports two modes:
-    1. Full config mode: lookup quant type from quant_description
-    2. Dynamic inference mode: use default_quant_type when key not found
     
     Args:
         quant_description: The quantization description dictionary.
         prefix: The layer prefix.
         packed_modules_mapping: Mapping for packed/fused modules.
-        default_quant_type: Default quant type for dynamic inference mode.
         
     Returns:
-        The quantization type string (e.g., "W8A8_DYNAMIC", "W8A8_MXFP8").
+        The quantization type string (e.g., "W8A8_DYNAMIC").
     """
     proj_name = prefix.split(".")[-1]
     if proj_name in packed_modules_mapping:
@@ -231,14 +230,7 @@ def get_linear_quant_type(
             for shard_proj_name in packed_modules_mapping[proj_name]
         ]
         for shard_prefix in shard_prefixes:
-            weight_key = shard_prefix + '.weight'
-            # Use default quant type if key not found
-            if weight_key not in quant_description:
-                if default_quant_type is not None:
-                    return default_quant_type
-                raise KeyError(f"Key {weight_key} not found in quant_description "
-                             "and no default_quant_type provided")
-            shard_quant_type = quant_description[weight_key]
+            shard_quant_type = quant_description[shard_prefix + '.weight']
 
             if quant_type is None:
                 quant_type = shard_quant_type
@@ -248,14 +240,7 @@ def get_linear_quant_type(
                     f"Shard {proj_name} uses {shard_quant_type}, but another shard"
                     f"use {quant_type}. Please check quantization config.")
     else:
-        weight_key = prefix + '.weight'
-        # Use default quant type if key not found
-        if weight_key not in quant_description:
-            if default_quant_type is not None:
-                return default_quant_type
-            raise KeyError(f"Key {weight_key} not found in quant_description "
-                         "and no default_quant_type provided")
-        quant_type = quant_description[weight_key]
+        quant_type = quant_description[prefix + '.weight']
     return quant_type
 
 
@@ -263,22 +248,18 @@ def get_quant_type_for_layer(
         quant_description: Dict[str, Any],
         prefix: str,
         layer_type: str,
-        packed_modules_mapping: Optional[Dict[str, Any]] = None,
-        default_quant_type: Optional[str] = None) -> Optional[str]:
+        packed_modules_mapping: Optional[Dict[str,
+                                              Any]] = None) -> Optional[str]:
     """Determine the quantization type for a layer.
-    
-    Supports dynamic inference mode: when quant_description does not have
-    specific layer config, use default_quant_type as fallback.
     
     Args:
         quant_description: The quantization description dictionary.
         prefix: The layer prefix.
         layer_type: The type of layer ("linear", "moe", "attention").
         packed_modules_mapping: Mapping for packed/fused modules.
-        default_quant_type: Default quant type for dynamic inference mode.
         
     Returns:
-        The quantization type string (e.g., "W8A8_DYNAMIC", "W8A8_MXFP8").
+        The quantization type string (e.g., "W8A8_DYNAMIC").
     """
     if packed_modules_mapping is None:
         packed_modules_mapping = dict()
@@ -288,34 +269,28 @@ def get_quant_type_for_layer(
         return quant_description['fa_quant_type']
     # Linear / MoE
     return get_linear_quant_type(quant_description, prefix,
-                                 packed_modules_mapping, default_quant_type)
+                                 packed_modules_mapping)
 
 
 def create_scheme_for_layer(
         quant_description: Dict[str, Any],
         prefix: str,
         layer_type: str,
-        packed_modules_mapping: Optional[Dict[str, Any]] = None,
-        default_quant_type: Optional[str] = None):
+        packed_modules_mapping: Optional[Dict[str, Any]] = None):
     """Create a quantization scheme instance for a layer.
-    
-    Supports dynamic inference mode: when quant_description does not have
-    specific layer config, use default_quant_type as fallback.
     
     Args:
         quant_description: The quantization description dictionary.
         prefix: The layer prefix.
         layer_type: The type of layer ("linear", "moe", "attention").
         packed_modules_mapping: Mapping for packed/fused modules.
-        default_quant_type: Default quant type for dynamic inference mode.
         
     Returns:
         An instance of the appropriate quantization scheme class.
     """
     logger.info_once("Using the vLLM Ascend modelslim Quantization now!")
     quant_type = get_quant_type_for_layer(quant_description, prefix,
-                                          layer_type, packed_modules_mapping,
-                                          default_quant_type)
+                                          layer_type, packed_modules_mapping)
 
     if quant_type is None:
         raise ValueError(
@@ -338,50 +313,11 @@ class AscendModelSlimConfig(QuantizationConfig):
     This class is a general class that parses quantization configs
     that are supported on Ascend hardware, specifically for models
     quantized using the ModelSlim tool.
-    
-    Supports two modes:
-    1. Full config mode: quant_model_description.json contains per-layer quant types
-    2. Dynamic inference mode: Only basic config (quant_method, default_quant_type),
-       layer quant types are inferred automatically based on layer type
-    
-    Dynamic mode is activated when config contains 'default_quant_type' but no
-    per-layer '.weight' entries. In this mode:
-    - LinearBase layers use default_quant_type (e.g., W8A8_MXFP8)
-    - lm_head, embedding, norm layers are automatically set to FLOAT
     """
-
-    # Layer name patterns that should NOT be quantized (kept as FLOAT)
-    FLOAT_LAYER_PATTERNS = [
-        "lm_head",           # Output head
-        "embed_tokens",      # Token embedding layer
-        "embed_positions",   # Position embedding
-        "wte",               # GPT-2 style token embedding
-        "wpe",               # GPT-2 style position embedding
-        "word_embeddings",   # BERT style embedding
-        "layernorm",         # LayerNorm
-        "layer_norm",        # LayerNorm variant
-        "norm",              # RMSNorm, LayerNorm, etc.
-        "ln_",               # LayerNorm shorthand (ln_f, ln_1, etc.)
-        "final_norm",        # Final normalization
-        "input_layernorm",   # Transformer input layernorm
-        "post_attention_layernorm",  # Post attention layernorm
-    ]
 
     def __init__(self, quant_config: Dict[str, Any]):
         super().__init__()
         self.quant_description = quant_config
-        
-        # Detect if running in dynamic inference mode
-        self._dynamic_mode = self._is_dynamic_mode(quant_config)
-        self._default_quant_type = None  # None means not using dynamic inference
-        
-        if self._dynamic_mode:
-            # Get default quant type, defaults to W8A8_MXFP8
-            self._default_quant_type = quant_config.get(
-                "default_quant_type", "W8A8_MXFP8")
-            logger.info(f"AscendModelSlimConfig: Dynamic inference mode enabled, "
-                       f"default_quant_type={self._default_quant_type}")
-        
         # TODO(whx): remove this adaptation after adding "shared_head"
         # to prefix of DeepSeekShareHead in vLLM.
         extra_quant_dict = {}
@@ -393,65 +329,6 @@ class AscendModelSlimConfig(QuantizationConfig):
                 new_k = k.replace("weight_packed", "weight")
                 extra_quant_dict[new_k] = self.quant_description[k]
         self.quant_description.update(extra_quant_dict)
-    
-    def _is_dynamic_mode(self, config: Dict[str, Any]) -> bool:
-        """Detect if running in dynamic inference mode.
-        
-        Dynamic mode conditions:
-        1. Config contains 'default_quant_type' field, or
-        2. Config has no per-layer config (no keys ending with '.weight')
-        
-        Args:
-            config: Quantization config dictionary.
-            
-        Returns:
-            bool: Whether dynamic inference mode is enabled.
-        """
-        # If default_quant_type is explicitly specified, use dynamic mode
-        if "default_quant_type" in config:
-            return True
-        
-        # Check if there is per-layer config (keys ending with .weight)
-        has_per_layer_config = any(
-            k.endswith(".weight") for k in config.keys()
-        )
-        
-        # If no per-layer config but has quant_method, use dynamic mode
-        if not has_per_layer_config and "quant_method" in config:
-            return True
-            
-        return False
-    
-    def _should_skip_layer(self, prefix: str) -> bool:
-        """Determine if a layer should skip quantization (kept as FLOAT).
-        
-        Uses layer name patterns instead of hardcoding specific layer names
-        for each model.
-        
-        Args:
-            prefix: The layer prefix name.
-            
-        Returns:
-            bool: True if the layer should skip quantization.
-        """
-        prefix_lower = prefix.lower()
-        for pattern in self.FLOAT_LAYER_PATTERNS:
-            if pattern in prefix_lower:
-                return True
-        return False
-    
-    def _get_dynamic_quant_type(self, prefix: str) -> str:
-        """Get quantization type for a layer in dynamic mode.
-        
-        Args:
-            prefix: The layer prefix name.
-            
-        Returns:
-            str: Quantization type, either "FLOAT" or default_quant_type.
-        """
-        if self._should_skip_layer(prefix):
-            return "FLOAT"
-        return self._default_quant_type
 
     def __repr__(self) -> str:
         return "AscendModelSlimConfig:\n" + super().__repr__()
@@ -521,10 +398,6 @@ class AscendModelSlimConfig(QuantizationConfig):
         from vllm.attention.layer import Attention
         if prefix.startswith("language_model"):
             prefix = prefix.split('.', 1)[-1]
-        
-        # Get default quant type for dynamic inference mode
-        default_quant_type = getattr(self, '_default_quant_type', None)
-        
         if isinstance(layer, LinearBase):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
@@ -534,16 +407,14 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return AscendUnquantizedLinearMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix,
                                              "linear",
-                                             self.packed_modules_mapping,
-                                             default_quant_type)
+                                             self.packed_modules_mapping)
             return AscendLinearMethod(scheme)
         elif isinstance(layer, Attention) and \
             'fa_quant_type' in self.quant_description.keys() and \
             self.quant_description['fa_quant_type'] is not None:
             scheme = create_scheme_for_layer(self.quant_description, prefix,
                                              "attention",
-                                             self.packed_modules_mapping,
-                                             default_quant_type)
+                                             self.packed_modules_mapping)
             return AscendKVCacheMethod(scheme)
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix,
@@ -554,8 +425,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
             scheme = create_scheme_for_layer(self.quant_description, prefix,
                                              "moe",
-                                             self.packed_modules_mapping,
-                                             default_quant_type)
+                                             self.packed_modules_mapping)
             return AscendFusedMoEMethod(scheme, layer.moe_config)
         elif isinstance(layer, VocabParallelEmbedding):
             if self.is_layer_skipped_ascend(prefix,
@@ -563,8 +433,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return UnquantizedEmbeddingMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix,
                                              "linear",
-                                             self.packed_modules_mapping,
-                                             default_quant_type)
+                                             self.packed_modules_mapping)
             return AscendEmbeddingMethod(scheme)
         return None
 
@@ -572,24 +441,6 @@ class AscendModelSlimConfig(QuantizationConfig):
         self,
         prefix: str,
         fused_mapping: Mapping[str, List[str]] = MappingProxyType({})):
-        """Determine if a layer should skip quantization.
-        
-        Supports two modes:
-        1. Full config mode: lookup quant type from quant_description
-        2. Dynamic inference mode: infer based on layer name patterns
-        
-        Args:
-            prefix: The layer prefix name.
-            fused_mapping: Mapping for fused modules.
-            
-        Returns:
-            bool: True if the layer should skip quantization.
-        """
-        # Dynamic inference mode: determine based on layer name patterns
-        if self._dynamic_mode:
-            return self._should_skip_layer(prefix)
-        
-        # Full config mode: lookup from quant_description
         # adapted from vllm.model_executor.layers.quantization.utils.quant_utils.is_layer_skipped
         proj_name = prefix.split(".")[-1]
         if proj_name in fused_mapping:
@@ -600,11 +451,8 @@ class AscendModelSlimConfig(QuantizationConfig):
 
             is_skipped = None
             for shard_prefix in shard_prefixes:
-                weight_key = shard_prefix + '.weight'
-                # Fallback to dynamic inference if key not found
-                if weight_key not in self.quant_description:
-                    return self._should_skip_layer(prefix)
-                is_shard_skipped = self.quant_description[weight_key] == "FLOAT"
+                is_shard_skipped = self.quant_description[shard_prefix +
+                                                          '.weight'] == "FLOAT"
 
                 if is_skipped is None:
                     is_skipped = is_shard_skipped
@@ -614,11 +462,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                         "are quantized. All shards of fused layers "
                         "to have the same precision.")
         else:
-            weight_key = prefix + '.weight'
-            # Fallback to dynamic inference if key not found
-            if weight_key not in self.quant_description:
-                return self._should_skip_layer(prefix)
-            is_skipped = self.quant_description[weight_key] == "FLOAT"
+            is_skipped = self.quant_description[prefix + '.weight'] == "FLOAT"
 
         assert is_skipped is not None
         return is_skipped
