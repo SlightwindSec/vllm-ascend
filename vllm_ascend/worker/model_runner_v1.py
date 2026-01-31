@@ -18,6 +18,7 @@
 #
 
 import math
+import os
 import sys
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
@@ -257,6 +258,12 @@ class NPUModelRunner(GPUModelRunner):
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        # MTP 调试开关，通过环境变量 VLLM_MTP_DEBUG=1 启用
+        self._mtp_debug_enabled = os.getenv("VLLM_MTP_DEBUG") == "1"
+        self._mtp_debug_dir = os.getenv("VLLM_MTP_DEBUG_DIR", "/tmp/vllm_mtp_debug")
+        self._mtp_debug_file_path = None
+        if self._mtp_debug_enabled:
+            self._mtp_debug_file_path = self._init_mtp_debug_log()
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
         dump_cfg = self.ascend_config.dump_config_path
@@ -381,6 +388,41 @@ class NPUModelRunner(GPUModelRunner):
 
     def _sync_device(self) -> None:
         torch.npu.synchronize()
+
+    def _init_mtp_debug_log(self) -> Optional[str]:
+        """初始化 MTP 调试日志文件"""
+        try:
+            os.makedirs(self._mtp_debug_dir, exist_ok=True)
+        except Exception:
+            return None
+        try:
+            tp_rank = get_tensor_model_parallel_world_size()
+            tp_rank = self.parallel_config.tensor_parallel_rank if hasattr(self, 'parallel_config') else 0
+        except Exception:
+            tp_rank = 0
+        try:
+            pp_rank = get_pp_group().rank_in_group
+        except Exception:
+            pp_rank = 0
+        try:
+            global_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        except Exception:
+            global_rank = 0
+        filename = f"mtp_debug_tp{tp_rank}_dp{self.dp_rank}_pp{pp_rank}_rank{global_rank}.log"
+        return os.path.join(self._mtp_debug_dir, filename)
+
+    def _log_mtp_debug(self, tag: str, **kwargs) -> None:
+        """记录 MTP 调试日志"""
+        if not self._mtp_debug_enabled or not self._mtp_debug_file_path:
+            return
+        import time
+        msg = " ".join(f"{k}={v}" for k, v in kwargs.items())
+        line = f"{time.time():.6f} MTP_DEBUG {tag} | {msg}\n"
+        try:
+            with open(self._mtp_debug_file_path, "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            pass
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
@@ -825,6 +867,29 @@ class NPUModelRunner(GPUModelRunner):
             logits_indices = nn.functional.pad(
                 logits_indices,
                 (0, max_num_reqs_across_dp - logits_indices.shape[0]))
+
+        # MTP 调试：记录 prepare_inputs 的关键信息
+        if self._mtp_debug_enabled:
+            li_len = int(logits_indices.numel())
+            li_min = int(logits_indices.min().item()) if li_len else -1
+            li_max = int(logits_indices.max().item()) if li_len else -1
+            draft_summary = None
+            if num_draft_tokens is not None:
+                draft_summary = {
+                    "sum": int(np.sum(num_draft_tokens)),
+                    "min": int(np.min(num_draft_tokens)),
+                    "max": int(np.max(num_draft_tokens)),
+                }
+            self._log_mtp_debug(
+                "prepare_inputs",
+                use_spec_decode=bool(use_spec_decode),
+                total_num_scheduled_tokens=int(total_num_scheduled_tokens),
+                num_reqs=int(num_reqs),
+                logits_indices_len=li_len,
+                logits_indices_min=li_min,
+                logits_indices_max=li_max,
+                num_draft_tokens=draft_summary,
+            )
 
         return logits_indices, spec_decode_metadata
 
@@ -1356,8 +1421,39 @@ class NPUModelRunner(GPUModelRunner):
                         self.debugger.step()
                     return output
 
+                # MTP 调试：检查图模式下 hidden_states 和 logits_indices 的对应关系
+                if self._mtp_debug_enabled:
+                    hs_shape = tuple(hidden_states.shape)
+                    li_len = int(logits_indices.numel())
+                    li_min = int(logits_indices.min().item()) if li_len else -1
+                    li_max = int(logits_indices.max().item()) if li_len else -1
+                    out_of_bound = li_max >= hs_shape[0] if li_len and len(hs_shape) > 0 else False
+                    self._log_mtp_debug(
+                        "pre_compute_logits",
+                        hidden_states_shape=hs_shape,
+                        logits_indices_len=li_len,
+                        logits_indices_min=li_min,
+                        logits_indices_max=li_max,
+                        num_tokens_padded=int(num_tokens_padded),
+                        num_tokens_unpadded=int(num_tokens_unpadded),
+                        cudagraph_mode=str(cudagraph_mode),
+                        out_of_bound=out_of_bound,
+                        use_spec_decode=use_spec_decode,
+                    )
+
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
+
+                # MTP 调试：检查 logits 的统计信息
+                if self._mtp_debug_enabled and logits is not None:
+                    logits_shape = tuple(logits.shape)
+                    argmax_ids = logits.argmax(dim=-1)
+                    argmax_list = argmax_ids[:min(4, argmax_ids.shape[0])].tolist()
+                    self._log_mtp_debug(
+                        "post_compute_logits",
+                        logits_shape=logits_shape,
+                        argmax_first_4=argmax_list,
+                    )
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -1556,6 +1652,20 @@ class NPUModelRunner(GPUModelRunner):
             logits,
             sampling_metadata,
         )
+        # MTP 调试：记录采样结果
+        if self._mtp_debug_enabled:
+            sampled_ids = sampler_output.sampled_token_ids
+            s_shape = tuple(sampled_ids.shape)
+            s_min = int(sampled_ids.min().item()) if sampled_ids.numel() else -1
+            s_max = int(sampled_ids.max().item()) if sampled_ids.numel() else -1
+            s_neg = int((sampled_ids < 0).sum().item()) if sampled_ids.numel() else 0
+            self._log_mtp_debug(
+                "sample_output",
+                sampled_shape=s_shape,
+                sampled_min=s_min,
+                sampled_max=s_max,
+                sampled_neg=s_neg,
+            )
         if self.need_accepted_tokens:  # TODO remove this if
             self._update_states_after_model_execute(
                 sampler_output.sampled_token_ids)
