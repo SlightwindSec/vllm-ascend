@@ -1683,6 +1683,14 @@ class NPUModelRunner(GPUModelRunner):
                 sampled_values=sampled_values,
                 **draft_info,
             )
+            # 额外记录：检查 num_tokens 和 num_tokens_no_spec 的更新
+            if hasattr(self.input_batch, 'num_tokens') and hasattr(self.input_batch, 'num_tokens_no_spec'):
+                num_reqs = self.input_batch.num_reqs
+                self._log_mtp_debug(
+                    "batch_state_before_update",
+                    num_tokens=self.input_batch.num_tokens[:num_reqs].tolist(),
+                    num_tokens_no_spec=self.input_batch.num_tokens_no_spec[:num_reqs].tolist(),
+                )
         if self.need_accepted_tokens:  # TODO remove this if
             self._update_states_after_model_execute(
                 sampler_output.sampled_token_ids)
@@ -1741,6 +1749,13 @@ class NPUModelRunner(GPUModelRunner):
                     discard_sampled_tokens_req_indices,
                     logprobs_tensors=logprobs_tensors,
                 )
+                # MTP 调试：记录 parse_output 的结果
+                if self._mtp_debug_enabled:
+                    self._log_mtp_debug(
+                        "parse_output_result",
+                        valid_sampled_token_ids=valid_sampled_token_ids,
+                        cu_num_tokens=cu_num_tokens,
+                    )
         else:
             valid_sampled_token_ids = []
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
