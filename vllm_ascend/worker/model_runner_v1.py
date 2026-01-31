@@ -865,6 +865,15 @@ class NPUModelRunner(GPUModelRunner):
                 token_ids_cpu_info["num_tokens_req0"] = num_tokens_req
                 token_ids_cpu_info["num_tokens_no_spec_req0"] = int(self.input_batch.num_tokens_no_spec[req_idx])
                 token_ids_cpu_info["num_computed_tokens_req0"] = int(self.input_batch.num_computed_tokens_cpu[req_idx])
+            # 记录 seq_lens 和 positions
+            seq_lens_list = self.seq_lens.np[:num_reqs].tolist() if num_reqs <= 10 else self.seq_lens.np[:10].tolist()
+            positions_list = positions_np[:min(10, len(positions_np))].tolist()
+            # 记录 slot_mapping（前几个）
+            slot_mapping_info = {}
+            if hasattr(self.input_batch, 'block_table') and len(self.input_batch.block_table) > 0:
+                sm = self.input_batch.block_table[0].slot_mapping
+                if hasattr(sm, 'np'):
+                    slot_mapping_info["slot_mapping_first_10"] = sm.np[:min(10, total_num_scheduled_tokens)].tolist()
             self._log_mtp_debug(
                 "prepare_inputs",
                 use_spec_decode=bool(use_spec_decode),
@@ -877,7 +886,10 @@ class NPUModelRunner(GPUModelRunner):
                 cu_num_tokens=cu_num_tokens_list,
                 num_scheduled_tokens=num_scheduled_tokens_list,
                 num_draft_tokens=draft_summary,
+                seq_lens=seq_lens_list,
+                positions=positions_list,
                 **token_ids_cpu_info,
+                **slot_mapping_info,
             )
 
         return logits_indices, spec_decode_metadata
@@ -1350,6 +1362,37 @@ class NPUModelRunner(GPUModelRunner):
         has_encoder_input = (
             self.model_config.is_encoder_decoder and num_encoder_reqs > 0
         )
+
+        # MTP 调试：记录 attention 元数据
+        if self._mtp_debug_enabled and attn_metadata:
+            attn_info = {}
+            # 获取第一个 layer 的 attn_metadata
+            first_layer_name = list(attn_metadata.keys())[0] if attn_metadata else None
+            if first_layer_name:
+                am = attn_metadata[first_layer_name]
+                # 检查 decode metadata
+                if hasattr(am, 'decode') and am.decode is not None:
+                    dm = am.decode
+                    if hasattr(dm, 'seq_lens'):
+                        attn_info["decode_seq_lens"] = dm.seq_lens[:min(4, len(dm.seq_lens))].tolist() if hasattr(dm.seq_lens, 'tolist') else str(dm.seq_lens)[:100]
+                    if hasattr(dm, 'slot_mapping'):
+                        attn_info["decode_slot_mapping_first_10"] = dm.slot_mapping[:min(10, len(dm.slot_mapping))].tolist() if hasattr(dm.slot_mapping, 'tolist') else str(dm.slot_mapping)[:100]
+                    if hasattr(dm, 'actual_seq_lengths_q'):
+                        attn_info["decode_actual_seq_lengths_q"] = dm.actual_seq_lengths_q[:min(10, len(dm.actual_seq_lengths_q))] if isinstance(dm.actual_seq_lengths_q, list) else str(dm.actual_seq_lengths_q)[:100]
+                    if hasattr(dm, 'block_table') and dm.block_table is not None:
+                        attn_info["decode_block_table_shape"] = tuple(dm.block_table.shape)
+                        attn_info["decode_block_table_first_row"] = dm.block_table[0, :min(5, dm.block_table.shape[1])].tolist() if dm.block_table.shape[0] > 0 else []
+                # 检查 prefill metadata
+                if hasattr(am, 'prefill') and am.prefill is not None:
+                    pm = am.prefill
+                    if hasattr(pm, 'seq_lens'):
+                        attn_info["prefill_seq_lens"] = pm.seq_lens[:min(4, len(pm.seq_lens))].tolist() if hasattr(pm.seq_lens, 'tolist') else str(pm.seq_lens)[:100]
+            self._log_mtp_debug(
+                "attn_metadata_before_forward",
+                cudagraph_mode=str(cudagraph_mode),
+                num_tokens_padded=int(num_tokens_padded),
+                **attn_info,
+            )
 
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
