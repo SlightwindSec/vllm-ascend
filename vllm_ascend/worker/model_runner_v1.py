@@ -850,6 +850,12 @@ class NPUModelRunner(GPUModelRunner):
                     "min": int(np.min(num_draft_tokens)),
                     "max": int(np.max(num_draft_tokens)),
                 }
+            # 记录 logits_indices 的实际值
+            logits_indices_list = logits_indices.tolist() if li_len <= 10 else logits_indices[:10].tolist()
+            # 记录 cu_num_tokens 的值
+            cu_num_tokens_list = cu_num_tokens.tolist() if len(cu_num_tokens) <= 10 else cu_num_tokens[:10].tolist()
+            # 记录 num_scheduled_tokens
+            num_scheduled_tokens_list = num_scheduled_tokens.tolist() if len(num_scheduled_tokens) <= 10 else num_scheduled_tokens[:10].tolist()
             self._log_mtp_debug(
                 "prepare_inputs",
                 use_spec_decode=bool(use_spec_decode),
@@ -858,6 +864,9 @@ class NPUModelRunner(GPUModelRunner):
                 logits_indices_len=li_len,
                 logits_indices_min=li_min,
                 logits_indices_max=li_max,
+                logits_indices_values=logits_indices_list,
+                cu_num_tokens=cu_num_tokens_list,
+                num_scheduled_tokens=num_scheduled_tokens_list,
                 num_draft_tokens=draft_summary,
             )
 
@@ -1391,6 +1400,38 @@ class NPUModelRunner(GPUModelRunner):
                     li_min = int(logits_indices.min().item()) if li_len else -1
                     li_max = int(logits_indices.max().item()) if li_len else -1
                     out_of_bound = li_max >= hs_shape[0] if li_len and len(hs_shape) > 0 else False
+                    
+                    # 记录 input_ids 的实际值（前几个和 padding 区域）
+                    input_ids_info = {}
+                    if input_ids is not None:
+                        input_ids_info["input_ids_first_4"] = input_ids[:min(4, input_ids.shape[0])].tolist()
+                        input_ids_info["input_ids_len"] = int(input_ids.shape[0])
+                        # 检查 unpadded 区域和 padded 区域的值
+                        if num_tokens_unpadded < num_tokens_padded:
+                            input_ids_info["input_ids_unpadded"] = input_ids[:num_tokens_unpadded].tolist()
+                            input_ids_info["input_ids_padded_region"] = input_ids[num_tokens_unpadded:num_tokens_padded].tolist()
+                    
+                    # 记录 positions 的实际值
+                    positions_info = {}
+                    if positions is not None:
+                        positions_info["positions_first_4"] = positions[:min(4, positions.shape[0])].tolist()
+                        if num_tokens_unpadded < num_tokens_padded:
+                            positions_info["positions_unpadded"] = positions[:num_tokens_unpadded].tolist()
+                            positions_info["positions_padded_region"] = positions[num_tokens_unpadded:num_tokens_padded].tolist()
+                    
+                    # 记录 hidden_states 的统计信息（检查是否有异常值）
+                    hs_info = {}
+                    if hidden_states is not None and len(hidden_states.shape) >= 2:
+                        # 检查前几个位置的 hidden_states 的 norm
+                        hs_norms = torch.norm(hidden_states[:min(4, hidden_states.shape[0])], dim=-1).tolist()
+                        hs_info["hs_norms_first_4"] = [round(n, 2) for n in hs_norms]
+                        # 检查 unpadded 和 padded 区域的 norm 差异
+                        if num_tokens_unpadded < num_tokens_padded:
+                            unpadded_norm = torch.norm(hidden_states[:num_tokens_unpadded], dim=-1).mean().item()
+                            padded_norm = torch.norm(hidden_states[num_tokens_unpadded:num_tokens_padded], dim=-1).mean().item()
+                            hs_info["unpadded_mean_norm"] = round(unpadded_norm, 2)
+                            hs_info["padded_mean_norm"] = round(padded_norm, 2)
+                    
                     self._log_mtp_debug(
                         "pre_compute_logits",
                         hidden_states_shape=hs_shape,
@@ -1402,6 +1443,9 @@ class NPUModelRunner(GPUModelRunner):
                         cudagraph_mode=str(cudagraph_mode),
                         out_of_bound=out_of_bound,
                         use_spec_decode=use_spec_decode,
+                        **input_ids_info,
+                        **positions_info,
+                        **hs_info,
                     )
 
                 sample_hidden_states = hidden_states[logits_indices]
