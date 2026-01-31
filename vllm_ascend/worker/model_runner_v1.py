@@ -1373,23 +1373,24 @@ class NPUModelRunner(GPUModelRunner):
             first_layer_name = list(attn_metadata.keys())[0] if attn_metadata else None
             if first_layer_name:
                 am = attn_metadata[first_layer_name]
-                # 记录 AscendMetadata 的关键字段
-                if hasattr(am, 'seq_lens') and am.seq_lens is not None:
-                    attn_info["am_seq_lens"] = am.seq_lens[:min(4, len(am.seq_lens))].tolist() if hasattr(am.seq_lens, 'tolist') else str(am.seq_lens)[:100]
-                if hasattr(am, 'slot_mapping') and am.slot_mapping is not None:
-                    attn_info["am_slot_mapping_first_10"] = am.slot_mapping[:min(10, len(am.slot_mapping))].tolist() if hasattr(am.slot_mapping, 'tolist') else str(am.slot_mapping)[:100]
+                # 直接记录 AscendMetadata 的关键字段
+                if hasattr(am, 'seq_lens_list') and am.seq_lens_list is not None:
+                    attn_info["seq_lens_list"] = am.seq_lens_list[:min(4, len(am.seq_lens_list))]
                 if hasattr(am, 'actual_seq_lengths_q') and am.actual_seq_lengths_q is not None:
-                    attn_info["am_actual_seq_lengths_q"] = am.actual_seq_lengths_q[:min(10, len(am.actual_seq_lengths_q))] if isinstance(am.actual_seq_lengths_q, list) else str(am.actual_seq_lengths_q)[:100]
-                if hasattr(am, 'block_tables') and am.block_tables is not None:
-                    attn_info["am_block_tables_shape"] = tuple(am.block_tables.shape)
-                    if am.block_tables.shape[0] > 0:
-                        attn_info["am_block_tables_first_row"] = am.block_tables[0, :min(5, am.block_tables.shape[1])].tolist()
+                    attn_info["actual_seq_lengths_q"] = am.actual_seq_lengths_q[:min(10, len(am.actual_seq_lengths_q))]
                 if hasattr(am, 'attn_state'):
-                    attn_info["am_attn_state"] = str(am.attn_state)
+                    attn_info["attn_state"] = str(am.attn_state)
+                if hasattr(am, 'slot_mapping') and am.slot_mapping is not None:
+                    attn_info["am_slot_mapping"] = am.slot_mapping[:min(10, len(am.slot_mapping))].tolist() if hasattr(am.slot_mapping, 'tolist') else str(am.slot_mapping)[:100]
+                if hasattr(am, 'block_tables') and am.block_tables is not None:
+                    attn_info["block_tables_shape"] = tuple(am.block_tables.shape)
+                    if am.block_tables.shape[0] > 0:
+                        attn_info["block_tables_first_row"] = am.block_tables[0, :min(10, am.block_tables.shape[1])].tolist()
+                if hasattr(am, 'query_start_loc') and am.query_start_loc is not None:
+                    attn_info["query_start_loc"] = am.query_start_loc[:min(5, len(am.query_start_loc))].tolist() if hasattr(am.query_start_loc, 'tolist') else str(am.query_start_loc)[:100]
+                # 记录 num_actual_tokens
                 if hasattr(am, 'num_actual_tokens'):
-                    attn_info["am_num_actual_tokens"] = am.num_actual_tokens
-                if hasattr(am, 'num_decode_tokens'):
-                    attn_info["am_num_decode_tokens"] = am.num_decode_tokens
+                    attn_info["num_actual_tokens"] = am.num_actual_tokens
             # 记录 num_accepted_tokens
             if hasattr(self.input_batch, 'num_accepted_tokens_cpu'):
                 attn_info["num_accepted_tokens"] = self.input_batch.num_accepted_tokens_cpu[:min(4, self.input_batch.num_reqs)].tolist()
@@ -1416,6 +1417,18 @@ class NPUModelRunner(GPUModelRunner):
                     skip_compiled=has_encoder_input),
                 self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
             ):
+                # 在图执行之前更新参数，确保使用当前迭代的正确参数
+                # 这是修复图模式 + MTP 投机解码乱码问题的关键
+                forward_context = get_forward_context()
+                if forward_context is not None and \
+                   forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and \
+                   not getattr(forward_context, 'capturing', False) and \
+                   not self.use_sparse and \
+                   positions is not None:
+                    update_full_graph_params(
+                        self.attn_backend, self.update_stream, forward_context,
+                        num_tokens_padded, self.vllm_config,
+                        self.speculative_config, positions.shape[0])
                 hidden_states = self._model_forward(
                     num_tokens_padded, input_ids, positions,
                     intermediate_tensors, inputs_embeds, **model_kwargs)
@@ -1930,14 +1943,10 @@ class NPUModelRunner(GPUModelRunner):
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
             **model_kwargs)
-        forward_context = get_forward_context()
-        assert forward_context is not None
-        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and \
-            not forward_context.capturing and not self.use_sparse:
-            assert positions is not None
-            update_full_graph_params(self.attn_backend, self.update_stream, forward_context,
-                                     num_tokens_padded, self.vllm_config,
-                                     self.speculative_config, positions.shape[0])
+        # 注意：update_full_graph_params 已经在 execute_model 中的图执行之前调用
+        # 这里不再需要调用，因为参数已经在图执行之前更新过了
+        # 原有的逻辑是在图执行之后更新参数，但这会导致图使用上一次的参数
+        # 修复后的逻辑是在图执行之前更新参数，确保图使用当前迭代的正确参数
         if get_forward_context().sp_enabled and not isinstance(
                 hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(
