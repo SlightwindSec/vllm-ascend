@@ -1390,6 +1390,14 @@ class NPUModelRunner(GPUModelRunner):
                     pm = am.prefill
                     if hasattr(pm, 'seq_lens'):
                         attn_info["prefill_seq_lens"] = pm.seq_lens[:min(4, len(pm.seq_lens))].tolist() if hasattr(pm.seq_lens, 'tolist') else str(pm.seq_lens)[:100]
+                # 检查 spec_decode 相关的 metadata
+                if hasattr(am, 'spec_decode') and am.spec_decode is not None:
+                    sd = am.spec_decode
+                    if hasattr(sd, 'slot_mapping'):
+                        attn_info["spec_decode_slot_mapping"] = sd.slot_mapping[:min(10, len(sd.slot_mapping))].tolist() if hasattr(sd.slot_mapping, 'tolist') else str(sd.slot_mapping)[:100]
+            # 记录 num_accepted_tokens
+            if hasattr(self.input_batch, 'num_accepted_tokens_cpu'):
+                attn_info["num_accepted_tokens"] = self.input_batch.num_accepted_tokens_cpu[:min(4, self.input_batch.num_reqs)].tolist()
             self._log_mtp_debug(
                 "attn_metadata_before_forward",
                 cudagraph_mode=str(cudagraph_mode),
