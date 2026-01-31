@@ -856,6 +856,15 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_tokens_list = cu_num_tokens.tolist() if len(cu_num_tokens) <= 10 else cu_num_tokens[:10].tolist()
             # 记录 num_scheduled_tokens
             num_scheduled_tokens_list = num_scheduled_tokens.tolist() if len(num_scheduled_tokens) <= 10 else num_scheduled_tokens[:10].tolist()
+            # 记录 token_ids_cpu 的内容（前 10 个 token）
+            token_ids_cpu_info = {}
+            if hasattr(self.input_batch, 'token_ids_cpu') and num_reqs > 0:
+                req_idx = 0
+                num_tokens_req = int(self.input_batch.num_tokens[req_idx])
+                token_ids_cpu_info["token_ids_cpu_req0"] = self.input_batch.token_ids_cpu[req_idx, :min(10, num_tokens_req + 3)].tolist()
+                token_ids_cpu_info["num_tokens_req0"] = num_tokens_req
+                token_ids_cpu_info["num_tokens_no_spec_req0"] = int(self.input_batch.num_tokens_no_spec[req_idx])
+                token_ids_cpu_info["num_computed_tokens_req0"] = int(self.input_batch.num_computed_tokens_cpu[req_idx])
             self._log_mtp_debug(
                 "prepare_inputs",
                 use_spec_decode=bool(use_spec_decode),
@@ -868,6 +877,7 @@ class NPUModelRunner(GPUModelRunner):
                 cu_num_tokens=cu_num_tokens_list,
                 num_scheduled_tokens=num_scheduled_tokens_list,
                 num_draft_tokens=draft_summary,
+                **token_ids_cpu_info,
             )
 
         return logits_indices, spec_decode_metadata
