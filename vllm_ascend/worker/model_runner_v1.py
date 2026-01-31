@@ -1373,28 +1373,23 @@ class NPUModelRunner(GPUModelRunner):
             first_layer_name = list(attn_metadata.keys())[0] if attn_metadata else None
             if first_layer_name:
                 am = attn_metadata[first_layer_name]
-                # 检查 decode metadata
-                if hasattr(am, 'decode') and am.decode is not None:
-                    dm = am.decode
-                    if hasattr(dm, 'seq_lens'):
-                        attn_info["decode_seq_lens"] = dm.seq_lens[:min(4, len(dm.seq_lens))].tolist() if hasattr(dm.seq_lens, 'tolist') else str(dm.seq_lens)[:100]
-                    if hasattr(dm, 'slot_mapping'):
-                        attn_info["decode_slot_mapping_first_10"] = dm.slot_mapping[:min(10, len(dm.slot_mapping))].tolist() if hasattr(dm.slot_mapping, 'tolist') else str(dm.slot_mapping)[:100]
-                    if hasattr(dm, 'actual_seq_lengths_q'):
-                        attn_info["decode_actual_seq_lengths_q"] = dm.actual_seq_lengths_q[:min(10, len(dm.actual_seq_lengths_q))] if isinstance(dm.actual_seq_lengths_q, list) else str(dm.actual_seq_lengths_q)[:100]
-                    if hasattr(dm, 'block_table') and dm.block_table is not None:
-                        attn_info["decode_block_table_shape"] = tuple(dm.block_table.shape)
-                        attn_info["decode_block_table_first_row"] = dm.block_table[0, :min(5, dm.block_table.shape[1])].tolist() if dm.block_table.shape[0] > 0 else []
-                # 检查 prefill metadata
-                if hasattr(am, 'prefill') and am.prefill is not None:
-                    pm = am.prefill
-                    if hasattr(pm, 'seq_lens'):
-                        attn_info["prefill_seq_lens"] = pm.seq_lens[:min(4, len(pm.seq_lens))].tolist() if hasattr(pm.seq_lens, 'tolist') else str(pm.seq_lens)[:100]
-                # 检查 spec_decode 相关的 metadata
-                if hasattr(am, 'spec_decode') and am.spec_decode is not None:
-                    sd = am.spec_decode
-                    if hasattr(sd, 'slot_mapping'):
-                        attn_info["spec_decode_slot_mapping"] = sd.slot_mapping[:min(10, len(sd.slot_mapping))].tolist() if hasattr(sd.slot_mapping, 'tolist') else str(sd.slot_mapping)[:100]
+                # 记录 AscendMetadata 的关键字段
+                if hasattr(am, 'seq_lens') and am.seq_lens is not None:
+                    attn_info["am_seq_lens"] = am.seq_lens[:min(4, len(am.seq_lens))].tolist() if hasattr(am.seq_lens, 'tolist') else str(am.seq_lens)[:100]
+                if hasattr(am, 'slot_mapping') and am.slot_mapping is not None:
+                    attn_info["am_slot_mapping_first_10"] = am.slot_mapping[:min(10, len(am.slot_mapping))].tolist() if hasattr(am.slot_mapping, 'tolist') else str(am.slot_mapping)[:100]
+                if hasattr(am, 'actual_seq_lengths_q') and am.actual_seq_lengths_q is not None:
+                    attn_info["am_actual_seq_lengths_q"] = am.actual_seq_lengths_q[:min(10, len(am.actual_seq_lengths_q))] if isinstance(am.actual_seq_lengths_q, list) else str(am.actual_seq_lengths_q)[:100]
+                if hasattr(am, 'block_tables') and am.block_tables is not None:
+                    attn_info["am_block_tables_shape"] = tuple(am.block_tables.shape)
+                    if am.block_tables.shape[0] > 0:
+                        attn_info["am_block_tables_first_row"] = am.block_tables[0, :min(5, am.block_tables.shape[1])].tolist()
+                if hasattr(am, 'attn_state'):
+                    attn_info["am_attn_state"] = str(am.attn_state)
+                if hasattr(am, 'num_actual_tokens'):
+                    attn_info["am_num_actual_tokens"] = am.num_actual_tokens
+                if hasattr(am, 'num_decode_tokens'):
+                    attn_info["am_num_decode_tokens"] = am.num_decode_tokens
             # 记录 num_accepted_tokens
             if hasattr(self.input_batch, 'num_accepted_tokens_cpu'):
                 attn_info["num_accepted_tokens"] = self.input_batch.num_accepted_tokens_cpu[:min(4, self.input_batch.num_reqs)].tolist()
