@@ -1667,12 +1667,21 @@ class NPUModelRunner(GPUModelRunner):
             s_min = int(sampled_ids.min().item()) if sampled_ids.numel() else -1
             s_max = int(sampled_ids.max().item()) if sampled_ids.numel() else -1
             s_neg = int((sampled_ids < 0).sum().item()) if sampled_ids.numel() else 0
+            # 记录完整的采样结果
+            sampled_values = sampled_ids.tolist() if sampled_ids.numel() <= 10 else sampled_ids[:10].tolist()
+            # 记录 spec_decode_metadata 中的 draft_token_ids
+            draft_info = {}
+            if spec_decode_metadata is not None:
+                draft_info["draft_token_ids"] = spec_decode_metadata.draft_token_ids.tolist() if spec_decode_metadata.draft_token_ids.numel() <= 10 else spec_decode_metadata.draft_token_ids[:10].tolist()
+                draft_info["num_draft_tokens"] = spec_decode_metadata.num_draft_tokens
             self._log_mtp_debug(
                 "sample_output",
                 sampled_shape=s_shape,
                 sampled_min=s_min,
                 sampled_max=s_max,
                 sampled_neg=s_neg,
+                sampled_values=sampled_values,
+                **draft_info,
             )
         if self.need_accepted_tokens:  # TODO remove this if
             self._update_states_after_model_execute(
