@@ -870,10 +870,13 @@ class NPUModelRunner(GPUModelRunner):
             positions_list = positions_np[:min(10, len(positions_np))].tolist()
             # 记录 slot_mapping（前几个）
             slot_mapping_info = {}
-            if hasattr(self.input_batch, 'block_table') and len(self.input_batch.block_table) > 0:
-                sm = self.input_batch.block_table[0].slot_mapping
-                if hasattr(sm, 'np'):
-                    slot_mapping_info["slot_mapping_first_10"] = sm.np[:min(10, total_num_scheduled_tokens)].tolist()
+            if hasattr(self.input_batch, 'block_table') and self.input_batch.block_table is not None:
+                try:
+                    sm = self.input_batch.block_table[0].slot_mapping
+                    if hasattr(sm, 'np'):
+                        slot_mapping_info["slot_mapping_first_10"] = sm.np[:min(10, total_num_scheduled_tokens)].tolist()
+                except (IndexError, TypeError, AttributeError):
+                    pass
             self._log_mtp_debug(
                 "prepare_inputs",
                 use_spec_decode=bool(use_spec_decode),
