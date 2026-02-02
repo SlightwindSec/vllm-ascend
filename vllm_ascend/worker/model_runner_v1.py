@@ -720,6 +720,7 @@ class NPUModelRunner(GPUModelRunner):
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
+        #self.seq_lens.np[num_reqs:] = 0
         self.seq_lens.copy_to_gpu()
 
         self.seq_lens.gpu[num_reqs:].fill_(0)
