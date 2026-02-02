@@ -354,6 +354,19 @@ class MtpProposer(EagleProposer):
                 last_token_indices = last_token_indices[:num_indices]
             draft_token_ids = logits.argmax(dim=-1)
 
+            import os
+            if os.environ.get("VLLM_MTP_DEBUG"):
+                debug_dir = os.environ.get("VLLM_MTP_DEBUG_DIR", ".")
+                debug_file = os.path.join(debug_dir, "mtp_debug_tp0_dp0_pp0_rank0.log")
+                with open(debug_file, "a") as f:
+                    f.write(f"mtp_propose: "
+                            f"step={step} "
+                            f"draft_token_ids={draft_token_ids.tolist()} "
+                            f"logits_argmax={logits.argmax(dim=-1).tolist()} "
+                            f"last_token_indices={last_token_indices.tolist()} "
+                            f"hidden_states_shape={tuple(hidden_states.shape)} "
+                            f"sample_hs_norm={torch.norm(sample_hidden_states, dim=-1).tolist()}\n")
+
             if self.num_speculative_tokens == 1:
                 # [batch_size, 1]
                 return draft_token_ids.view(-1, 1)

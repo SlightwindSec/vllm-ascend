@@ -408,9 +408,8 @@ class NPUModelRunner(GPUModelRunner):
         """记录 MTP 调试日志"""
         if not self._mtp_debug_enabled or not self._mtp_debug_file_path:
             return
-        import time
         msg = " ".join(f"{k}={v}" for k, v in kwargs.items())
-        line = f"{time.time():.6f} MTP_DEBUG {tag} | {msg}\n"
+        line = f"{tag}: {msg}\n"
         try:
             with open(self._mtp_debug_file_path, "a", encoding="utf-8") as f:
                 f.write(line)
@@ -850,6 +849,33 @@ class NPUModelRunner(GPUModelRunner):
                     "min": int(np.min(num_draft_tokens)),
                     "max": int(np.max(num_draft_tokens)),
                 }
+            # 记录 logits_indices 的实际值
+            logits_indices_list = logits_indices.tolist() if li_len <= 10 else logits_indices[:10].tolist()
+            # 记录 cu_num_tokens 的值
+            cu_num_tokens_list = cu_num_tokens.tolist() if len(cu_num_tokens) <= 10 else cu_num_tokens[:10].tolist()
+            # 记录 num_scheduled_tokens
+            num_scheduled_tokens_list = num_scheduled_tokens.tolist() if len(num_scheduled_tokens) <= 10 else num_scheduled_tokens[:10].tolist()
+            # 记录 token_ids_cpu 的内容（前 10 个 token）
+            token_ids_cpu_info = {}
+            if hasattr(self.input_batch, 'token_ids_cpu') and num_reqs > 0:
+                req_idx = 0
+                num_tokens_req = int(self.input_batch.num_tokens[req_idx])
+                token_ids_cpu_info["token_ids_cpu_req0"] = self.input_batch.token_ids_cpu[req_idx, :min(10, num_tokens_req + 3)].tolist()
+                token_ids_cpu_info["num_tokens_req0"] = num_tokens_req
+                token_ids_cpu_info["num_tokens_no_spec_req0"] = int(self.input_batch.num_tokens_no_spec[req_idx])
+                token_ids_cpu_info["num_computed_tokens_req0"] = int(self.input_batch.num_computed_tokens_cpu[req_idx])
+            # 记录 seq_lens 和 positions
+            seq_lens_list = self.seq_lens.np[:num_reqs].tolist() if num_reqs <= 10 else self.seq_lens.np[:10].tolist()
+            positions_list = positions_np[:min(10, len(positions_np))].tolist()
+            # 记录 slot_mapping（前几个）
+            slot_mapping_info = {}
+            if hasattr(self.input_batch, 'block_table') and self.input_batch.block_table is not None:
+                try:
+                    sm = self.input_batch.block_table[0].slot_mapping
+                    if hasattr(sm, 'np'):
+                        slot_mapping_info["slot_mapping_first_10"] = sm.np[:min(10, total_num_scheduled_tokens)].tolist()
+                except (IndexError, TypeError, AttributeError):
+                    pass
             self._log_mtp_debug(
                 "prepare_inputs",
                 use_spec_decode=bool(use_spec_decode),
@@ -858,7 +884,14 @@ class NPUModelRunner(GPUModelRunner):
                 logits_indices_len=li_len,
                 logits_indices_min=li_min,
                 logits_indices_max=li_max,
+                logits_indices_values=logits_indices_list,
+                cu_num_tokens=cu_num_tokens_list,
+                num_scheduled_tokens=num_scheduled_tokens_list,
                 num_draft_tokens=draft_summary,
+                seq_lens=seq_lens_list,
+                positions=positions_list,
+                **token_ids_cpu_info,
+                **slot_mapping_info,
             )
 
         return logits_indices, spec_decode_metadata
@@ -1332,6 +1365,41 @@ class NPUModelRunner(GPUModelRunner):
             self.model_config.is_encoder_decoder and num_encoder_reqs > 0
         )
 
+        # MTP 调试：记录 attention 元数据
+        if self._mtp_debug_enabled and attn_metadata:
+            attn_info = {}
+            # 获取第一个 layer 的 attn_metadata
+            first_layer_name = list(attn_metadata.keys())[0] if attn_metadata else None
+            if first_layer_name:
+                am = attn_metadata[first_layer_name]
+                # 直接记录 AscendMetadata 的关键字段
+                if hasattr(am, 'seq_lens_list') and am.seq_lens_list is not None:
+                    attn_info["seq_lens_list"] = am.seq_lens_list[:min(4, len(am.seq_lens_list))]
+                if hasattr(am, 'actual_seq_lengths_q') and am.actual_seq_lengths_q is not None:
+                    attn_info["actual_seq_lengths_q"] = am.actual_seq_lengths_q[:min(10, len(am.actual_seq_lengths_q))]
+                if hasattr(am, 'attn_state'):
+                    attn_info["attn_state"] = str(am.attn_state)
+                if hasattr(am, 'slot_mapping') and am.slot_mapping is not None:
+                    attn_info["am_slot_mapping"] = am.slot_mapping[:min(10, len(am.slot_mapping))].tolist() if hasattr(am.slot_mapping, 'tolist') else str(am.slot_mapping)[:100]
+                if hasattr(am, 'block_tables') and am.block_tables is not None:
+                    attn_info["block_tables_shape"] = tuple(am.block_tables.shape)
+                    if am.block_tables.shape[0] > 0:
+                        attn_info["block_tables_first_row"] = am.block_tables[0, :min(10, am.block_tables.shape[1])].tolist()
+                if hasattr(am, 'query_start_loc') and am.query_start_loc is not None:
+                    attn_info["query_start_loc"] = am.query_start_loc[:min(5, len(am.query_start_loc))].tolist() if hasattr(am.query_start_loc, 'tolist') else str(am.query_start_loc)[:100]
+                # 记录 num_actual_tokens
+                if hasattr(am, 'num_actual_tokens'):
+                    attn_info["num_actual_tokens"] = am.num_actual_tokens
+            # 记录 num_accepted_tokens
+            if hasattr(self.input_batch, 'num_accepted_tokens_cpu'):
+                attn_info["num_accepted_tokens"] = self.input_batch.num_accepted_tokens_cpu[:min(4, self.input_batch.num_reqs)].tolist()
+            self._log_mtp_debug(
+                "attn_metadata_before_forward",
+                cudagraph_mode=str(cudagraph_mode),
+                num_tokens_padded=int(num_tokens_padded),
+                **attn_info,
+            )
+
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
             with (
@@ -1391,6 +1459,38 @@ class NPUModelRunner(GPUModelRunner):
                     li_min = int(logits_indices.min().item()) if li_len else -1
                     li_max = int(logits_indices.max().item()) if li_len else -1
                     out_of_bound = li_max >= hs_shape[0] if li_len and len(hs_shape) > 0 else False
+
+                    # 记录 input_ids 的实际值（前几个和 padding 区域）
+                    input_ids_info = {}
+                    if input_ids is not None:
+                        input_ids_info["input_ids_first_4"] = input_ids[:min(4, input_ids.shape[0])].tolist()
+                        input_ids_info["input_ids_len"] = int(input_ids.shape[0])
+                        # 检查 unpadded 区域和 padded 区域的值
+                        if num_tokens_unpadded < num_tokens_padded:
+                            input_ids_info["input_ids_unpadded"] = input_ids[:num_tokens_unpadded].tolist()
+                            input_ids_info["input_ids_padded_region"] = input_ids[num_tokens_unpadded:num_tokens_padded].tolist()
+
+                    # 记录 positions 的实际值
+                    positions_info = {}
+                    if positions is not None:
+                        positions_info["positions_first_4"] = positions[:min(4, positions.shape[0])].tolist()
+                        if num_tokens_unpadded < num_tokens_padded:
+                            positions_info["positions_unpadded"] = positions[:num_tokens_unpadded].tolist()
+                            positions_info["positions_padded_region"] = positions[num_tokens_unpadded:num_tokens_padded].tolist()
+
+                    # 记录 hidden_states 的统计信息（检查是否有异常值）
+                    hs_info = {}
+                    if hidden_states is not None and len(hidden_states.shape) >= 2:
+                        # 检查前几个位置的 hidden_states 的 norm
+                        hs_norms = torch.norm(hidden_states[:min(4, hidden_states.shape[0])], dim=-1).tolist()
+                        hs_info["hs_norms_first_4"] = [round(n, 2) for n in hs_norms]
+                        # 检查 unpadded 和 padded 区域的 norm 差异
+                        if num_tokens_unpadded < num_tokens_padded:
+                            unpadded_norm = torch.norm(hidden_states[:num_tokens_unpadded], dim=-1).mean().item()
+                            padded_norm = torch.norm(hidden_states[num_tokens_unpadded:num_tokens_padded], dim=-1).mean().item()
+                            hs_info["unpadded_mean_norm"] = round(unpadded_norm, 2)
+                            hs_info["padded_mean_norm"] = round(padded_norm, 2)
+
                     self._log_mtp_debug(
                         "pre_compute_logits",
                         hidden_states_shape=hs_shape,
@@ -1402,6 +1502,9 @@ class NPUModelRunner(GPUModelRunner):
                         cudagraph_mode=str(cudagraph_mode),
                         out_of_bound=out_of_bound,
                         use_spec_decode=use_spec_decode,
+                        **input_ids_info,
+                        **positions_info,
+                        **hs_info,
                     )
 
                 sample_hidden_states = hidden_states[logits_indices]
@@ -1623,13 +1726,30 @@ class NPUModelRunner(GPUModelRunner):
             s_min = int(sampled_ids.min().item()) if sampled_ids.numel() else -1
             s_max = int(sampled_ids.max().item()) if sampled_ids.numel() else -1
             s_neg = int((sampled_ids < 0).sum().item()) if sampled_ids.numel() else 0
+            # 记录完整的采样结果
+            sampled_values = sampled_ids.tolist() if sampled_ids.numel() <= 10 else sampled_ids[:10].tolist()
+            # 记录 spec_decode_metadata 中的 draft_token_ids
+            draft_info = {}
+            if spec_decode_metadata is not None:
+                draft_info["draft_token_ids"] = spec_decode_metadata.draft_token_ids.tolist() if spec_decode_metadata.draft_token_ids.numel() <= 10 else spec_decode_metadata.draft_token_ids[:10].tolist()
+                draft_info["num_draft_tokens"] = spec_decode_metadata.num_draft_tokens
             self._log_mtp_debug(
                 "sample_output",
                 sampled_shape=s_shape,
                 sampled_min=s_min,
                 sampled_max=s_max,
                 sampled_neg=s_neg,
+                sampled_values=sampled_values,
+                **draft_info,
             )
+            # 额外记录：检查 num_tokens 和 num_tokens_no_spec 的更新
+            if hasattr(self.input_batch, 'num_tokens') and hasattr(self.input_batch, 'num_tokens_no_spec'):
+                num_reqs = self.input_batch.num_reqs
+                self._log_mtp_debug(
+                    "batch_state_before_update",
+                    num_tokens=self.input_batch.num_tokens[:num_reqs].tolist(),
+                    num_tokens_no_spec=self.input_batch.num_tokens_no_spec[:num_reqs].tolist(),
+                )
         if self.need_accepted_tokens:  # TODO remove this if
             self._update_states_after_model_execute(
                 sampler_output.sampled_token_ids)
@@ -1688,6 +1808,13 @@ class NPUModelRunner(GPUModelRunner):
                     discard_sampled_tokens_req_indices,
                     logprobs_tensors=logprobs_tensors,
                 )
+                # MTP 调试：记录 parse_output 的结果
+                if self._mtp_debug_enabled:
+                    self._log_mtp_debug(
+                        "parse_output_result",
+                        valid_sampled_token_ids=valid_sampled_token_ids,
+                        cu_num_tokens=cu_num_tokens,
+                    )
         else:
             valid_sampled_token_ids = []
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
