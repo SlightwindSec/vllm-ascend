@@ -720,10 +720,12 @@ class NPUModelRunner(GPUModelRunner):
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
-        #self.seq_lens.np[num_reqs:] = 0
+        # NOTE: 必须在 copy_to_gpu 之前将 padding 部分设为 0，
+        # 因为 seq_lens.cpu 会被用于构建 attention metadata
+        self.seq_lens.np[num_reqs:] = 0
         self.seq_lens.copy_to_gpu()
-
-        self.seq_lens.gpu[num_reqs:].fill_(0)
+        # GPU 上的 fill_(0) 可以去掉，因为已经在 CPU 上设置过了
+        # self.seq_lens.gpu[num_reqs:].fill_(0)
 
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, total_num_scheduled_tokens,

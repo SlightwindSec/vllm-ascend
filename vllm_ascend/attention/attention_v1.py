@@ -296,15 +296,28 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
 
+        # 计算 seq_lens_list 和 actual_seq_lengths_q
+        seq_lens_list = seq_lens.tolist()
+        # 计算实际请求数（seq_lens 非零的请求数）
+        num_actual_reqs = sum(1 for s in seq_lens_list if s > 0)
+        # actual_seq_lengths_q 只包含实际请求的累积 query 长度
+        # 对于 padding 请求，使用最后一个实际请求的累积值（这样 padding 请求的 query 范围为空）
+        full_actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
+        if num_actual_reqs > 0 and num_actual_reqs < len(full_actual_seq_lengths_q):
+            last_val = full_actual_seq_lengths_q[num_actual_reqs - 1]
+            actual_seq_lengths_q = full_actual_seq_lengths_q[:num_actual_reqs] + [last_val] * (len(full_actual_seq_lengths_q) - num_actual_reqs)
+        else:
+            actual_seq_lengths_q = full_actual_seq_lengths_q
+
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
             num_decode_tokens=num_decode_tokens,
             block_tables=block_table,
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
-            seq_lens_list=seq_lens.tolist(),
+            seq_lens_list=seq_lens_list,
             max_query_len=common_attn_metadata.max_query_len,
-            actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
+            actual_seq_lengths_q=actual_seq_lengths_q,
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
             swa_mask=swa_mask,
