@@ -25,7 +25,7 @@ from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, TypeAlias
 
 import numpy as np
 import torch
@@ -263,6 +263,10 @@ class NPUModelRunner(GPUModelRunner):
         self._mtp_debug_enabled = os.getenv("VLLM_MTP_DEBUG") == "1"
         self._mtp_debug_dir = os.getenv("VLLM_MTP_DEBUG_DIR", "/tmp/vllm_mtp_debug")
         self._mtp_debug_file_path = None
+        # 是否将第二次 forward 的输入/输出 tensor 保存到本地（VLLM_MTP_DEBUG_SAVE_TENSORS=1）
+        self._mtp_debug_save_tensors = os.getenv("VLLM_MTP_DEBUG_SAVE_TENSORS") == "1"
+        # 主模型 forward 步数计数，用于保存文件命名
+        self._mtp_forward_step_counter = 0
         if self._mtp_debug_enabled:
             self._mtp_debug_file_path = self._init_mtp_debug_log()
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
@@ -1279,6 +1283,121 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
         has_encoder_input = self.model_config.is_encoder_decoder and num_encoder_reqs > 0
 
+        self._mtp_forward_step_counter = getattr(self, "_mtp_forward_step_counter", 0) + 1
+        is_second_main_forward = (
+            self._mtp_debug_enabled
+            and use_spec_decode
+            and num_reqs > 0
+            and int(self.input_batch.num_computed_tokens_cpu[0]) > 0
+            and self._mtp_forward_step_counter == 2
+        )
+
+        first_layer_name = None
+        if is_second_main_forward:
+            if attn_metadata:
+                first_layer_name = list(attn_metadata.keys())[0] if attn_metadata else None
+            self._log_mtp_debug(
+                "second_forward_step",
+                step=int(self._mtp_forward_step_counter),
+                cudagraph_mode=str(cudagraph_mode),
+                num_tokens_unpadded=int(num_tokens_unpadded),
+                num_tokens_padded=int(num_tokens_padded),
+                num_reqs=int(num_reqs),
+                pad_attn=pad_attn,
+                num_pad_tokens=int(num_tokens_padded - num_tokens_unpadded),
+            )
+            if input_ids is not None:
+                self._log_mtp_debug(
+                    "second_forward_input_ids",
+                    input_ids_full=input_ids[:num_tokens_padded].tolist(),
+                    input_ids_unpadded=input_ids[:num_tokens_unpadded].tolist(),
+                    input_ids_padded_region=input_ids[num_tokens_unpadded:num_tokens_padded].tolist()
+                    if num_tokens_unpadded < num_tokens_padded
+                    else [],
+                )
+            if positions is not None:
+                self._log_mtp_debug(
+                    "second_forward_positions",
+                    positions_full=positions[:num_tokens_padded].tolist(),
+                    positions_unpadded=positions[:num_tokens_unpadded].tolist(),
+                    positions_padded_region=positions[num_tokens_unpadded:num_tokens_padded].tolist()
+                    if num_tokens_unpadded < num_tokens_padded
+                    else [],
+                )
+            self._log_mtp_debug(
+                "second_forward_logits_indices",
+                logits_indices=logits_indices.tolist(),
+            )
+            if attn_metadata and first_layer_name:
+                am = attn_metadata[first_layer_name]
+                attn_second = {}
+                if hasattr(am, "seq_lens_list") and am.seq_lens_list is not None:
+                    attn_second["seq_lens_list"] = am.seq_lens_list[: num_reqs + 2]
+                if hasattr(am, "actual_seq_lengths_q") and am.actual_seq_lengths_q is not None:
+                    attn_second["actual_seq_lengths_q"] = am.actual_seq_lengths_q[: min(20, len(am.actual_seq_lengths_q))]
+                if hasattr(am, "slot_mapping") and am.slot_mapping is not None:
+                    attn_second["slot_mapping_full"] = am.slot_mapping[:num_tokens_padded].tolist()
+                    if num_tokens_unpadded < num_tokens_padded:
+                        attn_second["slot_mapping_padded_region"] = am.slot_mapping[
+                            num_tokens_unpadded:num_tokens_padded
+                        ].tolist()
+                if hasattr(am, "block_tables") and am.block_tables is not None and am.block_tables.shape[0] > 0:
+                    attn_second["block_tables_first_row"] = am.block_tables[0, : min(16, am.block_tables.shape[1])].tolist()
+                if hasattr(am, "query_start_loc") and am.query_start_loc is not None:
+                    attn_second["query_start_loc"] = am.query_start_loc[: num_reqs + 2].tolist()
+                if hasattr(am, "num_actual_tokens"):
+                    attn_second["num_actual_tokens"] = am.num_actual_tokens
+                self._log_mtp_debug("second_forward_attn_metadata", **attn_second)
+            if hasattr(self.input_batch, "num_computed_tokens_cpu"):
+                self._log_mtp_debug(
+                    "second_forward_num_computed_tokens",
+                    num_computed_tokens_req0=int(self.input_batch.num_computed_tokens_cpu[0]),
+                    num_computed_tokens_all=self.input_batch.num_computed_tokens_cpu[:num_reqs].tolist(),
+                )
+            if hasattr(self.input_batch, "block_table") and self.input_batch.block_table is not None:
+                try:
+                    bt0 = self.input_batch.block_table[0]
+                    if hasattr(bt0, "slot_mapping") and hasattr(bt0.slot_mapping, "np"):
+                        self._log_mtp_debug(
+                            "second_forward_batch_slot_mapping",
+                            batch_slot_mapping=bt0.slot_mapping.np[:num_tokens_padded].tolist(),
+                        )
+                except (IndexError, TypeError, AttributeError):
+                    pass
+            self._log_mtp_debug(
+                "second_forward_model_kwargs_keys",
+                model_kwargs_keys=list(model_kwargs.keys()) if model_kwargs else [],
+            )
+            if self._mtp_debug_save_tensors and self._mtp_debug_dir:
+                try:
+                    prefix = "eager" if cudagraph_mode == CUDAGraphMode.NONE else "graph"
+                    path_ids = os.path.join(
+                        self._mtp_debug_dir,
+                        f"second_forward_{prefix}_step{self._mtp_forward_step_counter}_input_ids.pt",
+                    )
+                    path_pos = os.path.join(
+                        self._mtp_debug_dir,
+                        f"second_forward_{prefix}_step{self._mtp_forward_step_counter}_positions.pt",
+                    )
+                    torch.save(input_ids[:num_tokens_padded].cpu() if input_ids is not None else None, path_ids)
+                    torch.save(positions[:num_tokens_padded].cpu() if positions is not None else None, path_pos)
+                    if attn_metadata and first_layer_name:
+                        am = attn_metadata[first_layer_name]
+                        if hasattr(am, "slot_mapping") and am.slot_mapping is not None:
+                            path_slot = os.path.join(
+                                self._mtp_debug_dir,
+                                f"second_forward_{prefix}_step{self._mtp_forward_step_counter}_slot_mapping.pt",
+                            )
+                            torch.save(am.slot_mapping[:num_tokens_padded].cpu(), path_slot)
+                        if hasattr(am, "block_tables") and am.block_tables is not None:
+                            path_bt = os.path.join(
+                                self._mtp_debug_dir,
+                                f"second_forward_{prefix}_step{self._mtp_forward_step_counter}_block_tables.pt",
+                            )
+                            torch.save(am.block_tables.cpu(), path_bt)
+                except Exception as e:
+                    self._log_mtp_debug("second_forward_save_error", error=str(e))
+
         # MTP 调试：记录 attention 元数据
         if self._mtp_debug_enabled and attn_metadata:
             attn_info = {}
@@ -1431,6 +1550,47 @@ class NPUModelRunner(GPUModelRunner):
                         logits_shape=logits_shape,
                         argmax_first_4=argmax_list,
                     )
+                if is_second_main_forward and hidden_states is not None and len(hidden_states.shape) >= 2:
+                    hs_shape = tuple(hidden_states.shape)
+                    hs_norms_all = torch.norm(hidden_states[:num_tokens_padded], dim=-1).tolist()
+                    self._log_mtp_debug(
+                        "second_forward_hidden_states",
+                        hidden_states_shape=hs_shape,
+                        hs_norms_first_4=[round(x, 4) for x in hs_norms_all[:4]],
+                        unpadded_mean_norm=round(
+                            torch.norm(hidden_states[:num_tokens_unpadded], dim=-1).mean().item(), 4
+                        )
+                        if num_tokens_unpadded > 0
+                        else None,
+                        padded_mean_norm=round(
+                            torch.norm(hidden_states[num_tokens_unpadded:num_tokens_padded], dim=-1).mean().item(), 4
+                        )
+                        if num_tokens_unpadded < num_tokens_padded
+                        else None,
+                    )
+                    if logits is not None:
+                        argmax_ids = logits.argmax(dim=-1)
+                        self._log_mtp_debug(
+                            "second_forward_logits_argmax",
+                            argmax_all=argmax_ids.tolist(),
+                            argmax_first_4=argmax_ids[: min(4, argmax_ids.shape[0])].tolist(),
+                        )
+                    if self._mtp_debug_save_tensors and self._mtp_debug_dir:
+                        try:
+                            prefix = "eager" if cudagraph_mode == CUDAGraphMode.NONE else "graph"
+                            path_hs = os.path.join(
+                                self._mtp_debug_dir,
+                                f"second_forward_{prefix}_step{self._mtp_forward_step_counter}_hidden_states.pt",
+                            )
+                            path_logits = os.path.join(
+                                self._mtp_debug_dir,
+                                f"second_forward_{prefix}_step{self._mtp_forward_step_counter}_logits.pt",
+                            )
+                            torch.save(hidden_states[:num_tokens_padded].cpu(), path_hs)
+                            if logits is not None:
+                                torch.save(logits.cpu(), path_logits)
+                        except Exception as e:
+                            self._log_mtp_debug("second_forward_save_output_error", error=str(e))
 
             else:
                 # Rare case.
