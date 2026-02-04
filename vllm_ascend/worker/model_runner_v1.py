@@ -371,6 +371,7 @@ class NPUModelRunner(GPUModelRunner):
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
         self.long_seq_metadata = None
+        self.token_idx = 0
 
     @property
     def use_cp(self) -> bool:
@@ -382,26 +383,20 @@ class NPUModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         torch.npu.synchronize()
 
-    def _init_mtp_debug_log(self) -> Optional[str]:
-        """初始化 MTP 调试日志文件"""
-        try:
-            os.makedirs(self._mtp_debug_dir, exist_ok=True)
-        except Exception:
-            return None
-        try:
-            tp_rank = get_tensor_model_parallel_world_size()
-            tp_rank = self.parallel_config.tensor_parallel_rank if hasattr(self, 'parallel_config') else 0
-        except Exception:
-            tp_rank = 0
-        try:
-            pp_rank = get_pp_group().rank_in_group
-        except Exception:
-            pp_rank = 0
+    def _get_rank(self):
         try:
             global_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         except Exception:
             global_rank = 0
-        filename = f"mtp_debug_tp{tp_rank}_dp{self.dp_rank}_pp{pp_rank}_rank{global_rank}.log"
+        return global_rank
+
+    def _init_mtp_debug_log(self) -> Optional[str]:
+        try:
+            os.makedirs(self._mtp_debug_dir, exist_ok=True)
+        except Exception:
+            return None
+        global_rank = self._get_rank()
+        filename = f"mtp_debug_rank{global_rank}.log"
         return os.path.join(self._mtp_debug_dir, filename)
 
     def _log_mtp_debug(self, tag: str, **kwargs) -> None:
@@ -1369,15 +1364,15 @@ class NPUModelRunner(GPUModelRunner):
                 model_kwargs_keys=list(model_kwargs.keys()) if model_kwargs else [],
             )
             if self._mtp_debug_save_tensors and self._mtp_debug_dir:
+                global_rank = self._get_rank()
                 try:
-                    prefix = "eager" if cudagraph_mode == CUDAGraphMode.NONE else "graph"
                     path_ids = os.path.join(
-                        self._mtp_debug_dir,
-                        f"second_forward_{prefix}_step{self._mtp_forward_step_counter}_input_ids.pt",
+                        self._mtp_debug_dir, "dump",
+                        f"step{self._mtp_forward_step_counter}_input_ids_rank{global_rank}.pt",
                     )
                     path_pos = os.path.join(
-                        self._mtp_debug_dir,
-                        f"second_forward_{prefix}_step{self._mtp_forward_step_counter}_positions.pt",
+                        self._mtp_debug_dir, "dump",
+                        f"step{self._mtp_forward_step_counter}_positions_rank{global_rank}.pt",
                     )
                     torch.save(input_ids[:num_tokens_padded].cpu() if input_ids is not None else None, path_ids)
                     torch.save(positions[:num_tokens_padded].cpu() if positions is not None else None, path_pos)
@@ -1385,14 +1380,14 @@ class NPUModelRunner(GPUModelRunner):
                         am = attn_metadata[first_layer_name]
                         if hasattr(am, "slot_mapping") and am.slot_mapping is not None:
                             path_slot = os.path.join(
-                                self._mtp_debug_dir,
-                                f"second_forward_{prefix}_step{self._mtp_forward_step_counter}_slot_mapping.pt",
+                                self._mtp_debug_dir, "dump",
+                                f"step{self._mtp_forward_step_counter}_slot_mapping_rank{global_rank}.pt",
                             )
                             torch.save(am.slot_mapping[:num_tokens_padded].cpu(), path_slot)
                         if hasattr(am, "block_tables") and am.block_tables is not None:
                             path_bt = os.path.join(
-                                self._mtp_debug_dir,
-                                f"second_forward_{prefix}_step{self._mtp_forward_step_counter}_block_tables.pt",
+                                self._mtp_debug_dir, "dump",
+                                f"step{self._mtp_forward_step_counter}_block_tables_rank{global_rank}.pt",
                             )
                             torch.save(am.block_tables.cpu(), path_bt)
                 except Exception as e:
@@ -1570,27 +1565,29 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     if logits is not None:
                         argmax_ids = logits.argmax(dim=-1)
+                        torch.save(logits.cpu(), os.path.join(self._mtp_debug_dir, "dump", f"logits{self.token_idx}_rank{self._get_rank()}.pt"))
                         self._log_mtp_debug(
-                            "second_forward_logits_argmax",
+                            "forward_logits_argmax",
                             argmax_all=argmax_ids.tolist(),
                             argmax_first_4=argmax_ids[: min(4, argmax_ids.shape[0])].tolist(),
                         )
+                    self.token_idx += 1
                     if self._mtp_debug_save_tensors and self._mtp_debug_dir:
+                        global_rank = self._get_rank()
                         try:
-                            prefix = "eager" if cudagraph_mode == CUDAGraphMode.NONE else "graph"
                             path_hs = os.path.join(
-                                self._mtp_debug_dir,
-                                f"second_forward_{prefix}_step{self._mtp_forward_step_counter}_hidden_states.pt",
+                                self._mtp_debug_dir, "dump",
+                                f"step{self._mtp_forward_step_counter}_hidden_states_rank{global_rank}.pt",
                             )
                             path_logits = os.path.join(
-                                self._mtp_debug_dir,
-                                f"second_forward_{prefix}_step{self._mtp_forward_step_counter}_logits.pt",
+                                self._mtp_debug_dir, "dump",
+                                f"step{self._mtp_forward_step_counter}_logits_rank{global_rank}.pt",
                             )
                             torch.save(hidden_states[:num_tokens_padded].cpu(), path_hs)
                             if logits is not None:
                                 torch.save(logits.cpu(), path_logits)
                         except Exception as e:
-                            self._log_mtp_debug("second_forward_save_output_error", error=str(e))
+                            self._log_mtp_debug("forward_save_output_error", error=str(e))
 
             else:
                 # Rare case.

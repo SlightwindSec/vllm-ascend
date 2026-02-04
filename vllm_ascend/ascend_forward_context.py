@@ -57,7 +57,7 @@ def set_ascend_forward_context(
         "num_tokens_across_dp": num_tokens_across_dp,
         "cudagraph_runtime_mode": aclgraph_runtime_mode,
         "batch_descriptor": batch_descriptor,
-        "skip_compiled": skip_compiled,
+        # "skip_compiled": skip_compiled,
     }
 
     with set_forward_context(**forward_context_kwargs):

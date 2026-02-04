@@ -159,6 +159,13 @@ class EagleProposer(VllmEagleProposer):
 
         self._runnable = self._run_merged_draft
 
+    def _get_rank(self):
+        try:
+            global_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        except Exception:
+            global_rank = 0
+        return global_rank
+
     def load_model(self, model: nn.Module) -> None:
         target_attn_layer_names = set(
             get_layers_from_vllm_config(self.vllm_config,
@@ -634,7 +641,27 @@ class EagleProposer(VllmEagleProposer):
             last_token_indices = last_token_indices[:num_indices]
 
         draft_token_ids = logits.argmax(dim=-1)
-
+        import os
+        global_rank = self._get_rank()
+        if os.environ.get("VLLM_MTP_DEBUG"):
+            debug_dir = os.environ.get("VLLM_MTP_DEBUG_DIR", ".")
+            debug_file = os.path.join(debug_dir, f"mtp_debug_rank{global_rank}.log")
+            with open(debug_file, "a") as f:
+                f.write(f"mtp_propose: "
+                        f"step=0 "
+                        f"model_input_ids={model_input_ids.tolist()} "
+                        f"model_positions={model_positions.tolist()}\n")
+                torch.save(model_hidden_states.cpu(), os.path.join(debug_dir, "dump", f"mtp_model_hidden_states_rank{global_rank}.pt"))
+                if inputs_embeds is not None:
+                    torch.save(inputs_embeds.cpu(), os.path.join(debug_dir, "dump", f"mtp_inputs_embeds_rank{global_rank}.pt"))
+                torch.save(ret_hidden_states.cpu(), os.path.join(debug_dir, "dump", f"mtp_ret_hidden_states_rank{global_rank}.pt"))
+                f.write(f"mtp_propose: "
+                        f"step=0 "
+                        f"draft_token_ids={draft_token_ids.tolist()} "
+                        f"logits_argmax={logits.argmax(dim=-1).tolist()} "
+                        f"last_token_indices={last_token_indices.tolist()} "
+                        f"hidden_states_shape={tuple(hidden_states.shape)} "
+                        f"sample_hs_norm={torch.norm(sample_hidden_states, dim=-1).tolist()}\n")
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
             # [batch_size, 1]
