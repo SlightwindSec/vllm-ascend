@@ -22,8 +22,10 @@ import torch
 import torch.distributed as dist
 from vllm.logger import logger
 
+from vllm_ascend.eplb.adaptor.abstract_adaptor import EplbAdaptor
 
-class VllmEplbAdaptor:
+
+class VllmEplbAdaptor(EplbAdaptor):
     def __init__(self, model, **args):
         super().__init__(**args)
         self.model = model

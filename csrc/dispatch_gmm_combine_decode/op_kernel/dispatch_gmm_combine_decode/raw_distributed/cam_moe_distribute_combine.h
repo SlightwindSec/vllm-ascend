@@ -9,9 +9,7 @@
  */
 #ifndef CAM_MOE_DISTRIBUTE_COMBINE_H
 #define CAM_MOE_DISTRIBUTE_COMBINE_H
-#ifndef OPT_RANK_OFFSET
 #define OPT_RANK_OFFSET 512
-#endif
 
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"

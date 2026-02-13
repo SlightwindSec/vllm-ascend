@@ -17,16 +17,18 @@
 
 import torch
 import torch.nn.functional as F
-import torch_npu
 
 from vllm_ascend.ops.activation import AscendSiluAndMul
+from vllm_ascend.utils import get_weight_prefetch_method
 
 
 class AscendSiluAndMul310(AscendSiluAndMul):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.shape[-1] % 32 == 0:
-            out = torch_npu.npu_swiglu(x)
-        else:
-            h = x.shape[-1] // 2
-            out = F.silu(x[..., :h]) * x[..., h:]
+        weight_prefetch_method = get_weight_prefetch_method()
+        if weight_prefetch_method:
+            weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess(weight_prefetch_method.MLP_DOWN, x)
+        h = x.shape[-1] // 2
+        out = (F.silu(x[..., :h].to(torch.float32)) * x[..., h:].to(torch.float32)).to(torch.float16)
+        if weight_prefetch_method:
+            weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(out)
         return out

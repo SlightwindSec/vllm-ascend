@@ -35,14 +35,9 @@ from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 class AclGraphManager(CudaGraphManager):
     """ACL Graph Manager for Ascend NPUs."""
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        use_mrope: bool,
-        device: torch.device,
-    ):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device):
         with torch_cuda_wrapper():
-            super().__init__(vllm_config, use_mrope, device)
+            super().__init__(vllm_config, device)
 
     def capture_graph(
         self,

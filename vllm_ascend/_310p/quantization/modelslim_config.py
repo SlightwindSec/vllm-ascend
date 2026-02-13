@@ -31,13 +31,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 
-from vllm_ascend._310p.quantization.methods.registry import (
-    get_scheme_class,
+# Important: trigger 310P method registrations (register into 310P-local registry)
+from vllm_ascend._310p.quantization import methods as _methods_310p  # noqa: F401
+from vllm_ascend._310p.quantization.methods.registry import get_scheme_class as get_scheme_class_310p
+from vllm_ascend.quantization.method_adapters import (
+    AscendLinearMethod,
 )
-from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod, AscendLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     AscendModelSlimConfig,
-    get_quant_type_for_layer,
     packed_modules_model_mapping,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
@@ -45,35 +46,32 @@ from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 logger = init_logger(__name__)
 
 
-def create_scheme_for_layer(
+def create_scheme_for_layer_310p(
+    cfg: AscendModelSlimConfig,
     quant_description: dict[str, Any],
     prefix: str,
     layer_type: str,
     packed_modules_mapping: dict[str, Any] | None = None,
 ):
-    """Create a quantization scheme instance for a layer.
+    """Create 310P quant scheme (mainline-like).
 
-    Args:
-        quant_description: The quantization description dictionary.
-        prefix: The layer prefix.
-        layer_type: The type of layer ("linear", "moe", "attention").
-        packed_modules_mapping: Mapping for packed/fused modules.
-
-    Returns:
-        An instance of the appropriate quantization scheme class.
+    - If quant_type cannot be determined: raise ValueError
+    - If quant_type is determined but not supported on 310P: raise NotImplementedError
     """
-    logger.info_once("Using the vLLM Ascend modelslim Quantization now!")
-    quant_type = get_quant_type_for_layer(quant_description, prefix, layer_type, packed_modules_mapping)
+    logger.info_once("Using 310P ModelSlim Quantization routing.")
 
+    if layer_type != "linear":
+        raise NotImplementedError(f"310P quantization: layer_type={layer_type} is not supported yet (TODO).")
+
+    quant_type = cfg._get_linear_quant_type(prefix)
     if quant_type is None:
-        raise ValueError(f"Could not determine quantization type for layer {prefix}.")
+        raise ValueError(f"310P quantization: could not determine quant_type for layer={prefix}.")
 
-    # Use registry to get scheme class
-    scheme_cls = get_scheme_class(quant_type, layer_type)
-    if scheme_cls is not None:
-        return scheme_cls()
-    else:
-        raise NotImplementedError(f"Currently, vLLM Ascend doesn't support {quant_type} for {layer_type}.")
+    scheme_cls = get_scheme_class_310p(quant_type, "linear")
+    if scheme_cls is None:
+        raise NotImplementedError(f"310P quantization: quant_type={quant_type} for linear is not supported yet (TODO).")
+
+    return scheme_cls()
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
@@ -85,6 +83,40 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
       fused modules (qkv_proj / gate_up_proj) will miss and fallback to base,
       causing NZ/transpose issues on 310P.
     """
+
+    def _get_linear_quant_type(self, prefix: str) -> str | None:
+        """Packed-aware quant type lookup.
+
+        ModelSlim may describe fused modules by their shards.
+        Example:
+          prefix = "...qkv_proj" -> shards "...q_proj.weight", "...k_proj.weight", "...v_proj.weight"
+        """
+        fused_mapping = getattr(self, "packed_modules_mapping", {}) or {}
+        proj_name = prefix.split(".")[-1]
+
+        if proj_name in fused_mapping:
+            shard_prefixes = [
+                prefix.replace(proj_name, shard_proj_name) for shard_proj_name in fused_mapping[proj_name]
+            ]
+            quant_types: list[str] = []
+            for sp in shard_prefixes:
+                qt = self.quant_description.get(sp + ".weight")
+                if isinstance(qt, str):
+                    quant_types.append(qt)
+
+            if not quant_types:
+                return None
+
+            first = quant_types[0]
+            if any(q != first for q in quant_types[1:]):
+                raise ValueError(
+                    f"310P quantization: not all shards of fused layer '{prefix}' "
+                    f"share the same quant type. shards={shard_prefixes}, types={quant_types}"
+                )
+            return first
+
+        qt = self.quant_description.get(prefix + ".weight")
+        return qt if isinstance(qt, str) else None
 
     def get_quant_method(
         self,
@@ -104,11 +136,12 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
         if isinstance(layer, LinearBase):
             packed = getattr(self, "packed_modules_mapping", {})
             if self.is_layer_skipped_ascend(prefix, packed):
-                from vllm_ascend._310p.ops.linear import AscendUnquantizedLinearMethod310
+                from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
-                return AscendUnquantizedLinearMethod310()
+                return AscendUnquantizedLinearMethod()
 
-            scheme = create_scheme_for_layer(
+            scheme = create_scheme_for_layer_310p(
+                cfg=self,
                 quant_description=self.quant_description,
                 prefix=prefix,
                 layer_type="linear",
@@ -116,15 +149,14 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
             )
             return AscendLinearMethod(scheme)
 
-        elif isinstance(layer, FusedMoE):
-            if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
-                from vllm_ascend._310p.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod310
-
-                return AscendUnquantizedFusedMoEMethod310(layer.moe_config)
-            scheme = create_scheme_for_layer(self.quant_description, prefix, "moe", self.packed_modules_mapping)
-            return AscendFusedMoEMethod(scheme, layer.moe_config)
-
-        elif isinstance(layer, VocabParallelEmbedding):
+        if isinstance(layer, VocabParallelEmbedding):
             return UnquantizedEmbeddingMethod()
+
+        if isinstance(layer, FusedMoE):
+            raise NotImplementedError(
+                "310P quantization: FusedMoE is not supported yet. "
+                "TODO: add 310P MoE quant schemes and routing. "
+                "Workaround: use a non-MoE model."
+            )
 
         return super().get_quant_method(layer, prefix)

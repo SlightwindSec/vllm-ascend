@@ -149,9 +149,10 @@ class CustomRowParallelOp(CustomLinearOp):
     def apply(self, input_):
         output, output_bias = self.apply_impl(input_)
         weight_prefetch_method = get_weight_prefetch_method()
-        weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess(
-            weight_prefetch_method.MLP_GATE_UP, output, self.prefix
-        )
+        if weight_prefetch_method:
+            weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess(
+                weight_prefetch_method.MLP_GATE_UP, output, self.prefix
+            )
 
         if not self.return_bias:
             return output

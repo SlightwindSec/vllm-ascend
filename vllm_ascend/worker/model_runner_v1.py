@@ -53,11 +53,11 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
-    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
@@ -1197,10 +1197,8 @@ class NPUModelRunner(GPUModelRunner):
                 model_kwargs,
                 ec_connector_output,
             ) = self._preprocess(scheduler_output, num_tokens_padded, intermediate_tensors)
-
             # update global cos, sin
             update_cos_sin(positions)
-
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
@@ -1366,6 +1364,9 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+            
+            if self.need_accepted_tokens:  # TODO remove this if
+                self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
@@ -1467,8 +1468,6 @@ class NPUModelRunner(GPUModelRunner):
             logits,
             sampling_metadata,
         )
-        if self.need_accepted_tokens:  # TODO remove this if
-            self._update_states_after_model_execute(sampler_output.sampled_token_ids)
         return sampler_output
 
     # TODO: remove this func after eagle_proposer is refactored and
@@ -2310,7 +2309,7 @@ class NPUModelRunner(GPUModelRunner):
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
-                model_register(self.model)
+                model_register(self.model, self.model_config)
             if self.drafter:
                 logger.info("Loading drafter model...")
                 with get_tp_context(self.drafter):
@@ -2440,11 +2439,12 @@ class NPUModelRunner(GPUModelRunner):
                         k_tensor_split_factor = 2
                         v_tensor_split_factor = 2
                     elif self.use_sparse:
-                        # for deepseek v3.2, we split the kv cache according to the corresponding ratio
-                        sparse_sum_head_size = sum(self._get_sparse_kv_cache_ratio())
-                        k_tensor_split_factor, v_tensor_split_factor, dsa_k_cache_factor = [  # type: ignore
-                            sparse_sum_head_size / ratio for ratio in self._get_sparse_kv_cache_ratio()
-                        ]
+                        # for deepseek v3.2, DSA use FullAttentionSpec
+                        # FullAttentionSpec allocate 2 * mla page size bytes,
+                        # and we use half of that for k cache in DSA
+                        dsa_k_cache_factor = 2
+                        k_tensor_split_factor = 2 * head_size / self.model_config.hf_text_config.kv_lora_rank
+                        v_tensor_split_factor = 2 * head_size / self.model_config.hf_text_config.qk_rope_head_dim
                         dsa_k_cache_size = int(kv_cache_tensor.size // dsa_k_cache_factor)
                     else:
                         # for other deepseek models, use MLAAttentionSpec
@@ -2582,14 +2582,9 @@ class NPUModelRunner(GPUModelRunner):
                     v_cache = raw_v_tensor.view(dtype).view(v_shape)
 
                     if self.use_sparse and raw_dsa_k_tensor is not None:
-                        index_head_dim = self._get_sparse_kv_cache_ratio()[-1]
-                        dsa_k_cache_shape = (
-                            num_blocks,
-                            kv_cache_spec.block_size,
-                            kv_cache_spec.num_kv_heads,
-                            index_head_dim,
-                        )
-                        dsa_k_cache = raw_dsa_k_tensor.view(dtype).view(dsa_k_cache_shape)
+                        dsa_k_cache_shape = (num_blocks, kv_cache_spec.block_size, 1, 128)
+                        dsa_k_cache_size = (num_blocks) * kv_cache_spec.block_size * 128 * dtype.itemsize
+                        dsa_k_cache = raw_dsa_k_tensor[:dsa_k_cache_size].view(dtype).view(dsa_k_cache_shape)
                         kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache)
                     else:
                         kv_caches[layer_name] = (k_cache, v_cache)
@@ -2838,13 +2833,12 @@ class NPUModelRunner(GPUModelRunner):
                 if self.use_sparse:
                     # TODO(cmq): This is a hack way to fix deepseek kvcache when
                     # using DSA. Fix the spec in vLLM is the final way.
-                    sparse_sum_head_size = sum(self._get_sparse_kv_cache_ratio())
-                    kv_cache_spec[layer_name] = MLAAttentionSpec(
-                        block_size=self.block_size,
+                    block_size = self.vllm_config.cache_config.block_size
+                    kv_cache_spec[layer_name] = FullAttentionSpec(
+                        block_size=block_size,
                         num_kv_heads=1,
-                        head_size=sparse_sum_head_size,
+                        head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
-                        cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
@@ -2860,16 +2854,6 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
-
-    def _get_sparse_kv_cache_ratio(self) -> list[int]:
-        # TODO:If C8 is supported, we need to consider the number of bytes occupied by different dtypes
-        #  when calculating the ratio，for example:
-        #  [kv_lora_rank * torch.int8.itemsize, qk_rope_head_dim * torch.bfloat16.itemsize, ...]
-        return [
-            self.model_config.hf_text_config.kv_lora_rank,
-            self.model_config.hf_text_config.qk_rope_head_dim,
-            self.model_config.hf_text_config.index_head_dim,
-        ]
 
     def _check_and_update_cudagraph_mode(
         self,

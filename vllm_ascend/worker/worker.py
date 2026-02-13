@@ -336,6 +336,13 @@ class NPUWorker(WorkerBase):
         available_kv_cache_memory = int(total_npu_memory * self.cache_config.gpu_memory_utilization - peak_memory)
         available_kv_cache_memory = int(max(available_kv_cache_memory, 0))
         logger.info(f"Available memory: {available_kv_cache_memory}, total memory: {total_npu_memory}")
+        if self.model_config.architecture in ("Qwen3NextForCausalLM",
+                                           "Qwen3_5ForConditionalGeneration",
+                                           "Qwen3_5MoeForConditionalGeneration"):
+            # NOTE(zepeng): Currently for Model with LinearAttention, 
+            # two copies of kv_cache_raw_tensors will be created.
+            # It should be removed after import multi_block_pool.
+            available_kv_cache_memory = available_kv_cache_memory // 2
         return available_kv_cache_memory
 
     def execute_model(
@@ -571,38 +578,3 @@ class NPUWorker(WorkerBase):
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
-
-    def check_health(self) -> None:
-        import subprocess
-
-        logger.info("check_health Start!")
-        try:
-            result = subprocess.run(
-                ["npu-smi", "info", "-i", str(self.local_rank), "-t", "health"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-
-            if result.returncode == 0:
-                parse_text_output(result.stdout)
-                logger.info("check_health success!")
-            else:
-                logger.info(f"query NPU card {self.local_rank} fail: {result.stderr}")
-        except subprocess.TimeoutExpired:
-            logger.info(f"query NPU card  {self.local_rank} timeout.")
-        except FileNotFoundError:
-            logger.info("npu-smi tool not found.")
-        except Exception as e:
-            logger.info(f"query NPU card {self.local_rank} fail: {e}")
-        return
-
-
-def parse_text_output(output) -> None:
-    lines = output.strip().split("\n")
-    for i, line in enumerate(lines):
-        line = line.strip()
-        if "Health" in line:
-            if line.split(":")[-1].strip() != "OK":
-                raise RuntimeError("NPU card health status is not OK")
-    return
