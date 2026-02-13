@@ -1364,9 +1364,13 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
-            
-            if self.need_accepted_tokens:  # TODO remove this if
-                self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
+
+            if self.need_accepted_tokens:
+                # Launch async D2H on auxiliary stream so that draft model
+                # operators can be dispatched immediately on the main stream
+                # without waiting for the CPU synchronization.
+                self._update_states_async(
+                    sampler_output.sampled_token_ids)
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
@@ -1469,6 +1473,73 @@ class NPUModelRunner(GPUModelRunner):
             sampling_metadata,
         )
         return sampler_output
+
+    def _update_states_async(
+        self, output_token_ids: torch.Tensor
+    ) -> None:
+        """Asynchronously compute num_accepted_tokens on an auxiliary stream.
+
+        This moves the GPU->CPU synchronization off the main stream so that
+        draft model operators can be dispatched immediately without waiting
+        for the D2H transfer to complete.  The result is consumed later by
+        ``_sync_accepted_tokens`` in the next iteration's ``_prepare_inputs``.
+
+        Follows the same dual-stream pattern used for
+        ``num_computed_tokens_stream`` in the v2 model runner.
+        """
+        # Capture the current (main) stream so the aux stream can wait on it.
+        main_stream = torch.npu.current_stream()
+
+        with torch.npu.stream(self._accepted_tokens_stream):
+            # Wait until the main stream finishes the rejection sampler so
+            # that output_token_ids is ready.
+            self._accepted_tokens_stream.wait_stream(main_stream)
+
+            # Compute num_accepted_tokens on the auxiliary stream (NPU side).
+            padded = torch.cat(
+                [
+                    output_token_ids,
+                    torch.full(
+                        (output_token_ids.size(0), 1),
+                        -1,
+                        device=output_token_ids.device,
+                    ),
+                ],
+                dim=1,
+            )
+            first_neg = (padded == -1).int().argmax(-1)
+
+            # Non-blocking D2H copy.  The destination
+            # ``num_accepted_tokens_cpu_tensor`` uses pinned memory, so
+            # non_blocking=True is safe and avoids a device sync.
+            self._pending_accepted_tokens_cpu = first_neg.to(
+                "cpu", non_blocking=True
+            )
+
+            # Record an event so that _sync_accepted_tokens can wait for
+            # the D2H copy to finish.
+            self._accepted_tokens_ready_event.record()
+
+    def _sync_accepted_tokens(self) -> None:
+        """Wait for the async D2H copy and write results to the numpy buffer.
+
+        Must be called before ``num_accepted_tokens_cpu`` is read, which
+        happens in ``_prepare_inputs`` of the *next* iteration.
+        """
+        if self._pending_accepted_tokens_cpu is None:
+            return
+
+        # Block the CPU until the auxiliary stream has finished the D2H copy.
+        self._accepted_tokens_ready_event.synchronize()
+
+        # Safe to read now – write into the numpy buffer consumed by
+        # _prepare_inputs.
+        num_accepted = self._pending_accepted_tokens_cpu.numpy()
+        for i, num_tokens in enumerate(num_accepted):
+            self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+
+        # Release the reference so we don't sync again next time.
+        self._pending_accepted_tokens_cpu = None
 
     # TODO: remove this func after eagle_proposer is refactored and
     #  _bookkeeping_sync is moved after propose_draft_token_ids
@@ -1838,6 +1909,9 @@ class NPUModelRunner(GPUModelRunner):
         else:
             max_seq_len = self.seq_lens.np[:num_reqs].max().item()
         if use_spec_decode and self.need_accepted_tokens:
+            # Wait for the async D2H copy launched in the previous iteration's
+            # _update_states_async to finish before reading the numpy buffer.
+            self._sync_accepted_tokens()
             self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
@@ -2344,6 +2418,15 @@ class NPUModelRunner(GPUModelRunner):
         self.need_accepted_tokens = any(
             [isinstance(attn_group[0].kv_cache_spec, MambaSpec) for attn_group in self.attn_groups]
         )
+
+        # Initialize auxiliary stream and event for async D2H copy of
+        # num_accepted_tokens. This allows _update_states_after_model_execute
+        # to run on a separate stream, overlapping with draft model execution
+        # and eliminating the bubble between main model and draft model.
+        if self.need_accepted_tokens:
+            self._accepted_tokens_stream = torch.npu.Stream()
+            self._accepted_tokens_ready_event = torch.npu.Event()
+            self._pending_accepted_tokens_cpu: torch.Tensor | None = None
 
         self.may_reinitialize_input_batch(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
