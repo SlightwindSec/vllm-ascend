@@ -1364,9 +1364,6 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
-            
-            if self.need_accepted_tokens:  # TODO remove this if
-                self._update_states_after_model_execute(sampler_output.sampled_token_ids, scheduler_output)
 
             if self.need_accepted_tokens:
                 # Launch async D2H on auxiliary stream so that draft model
