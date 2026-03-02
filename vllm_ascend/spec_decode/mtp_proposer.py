@@ -450,36 +450,14 @@ class MtpProposer(EagleProposer):
                     slot_indices = torch.cat(slot_indices_list, dim=0)
 
                     # fold block_table (restore it to original size before flattened)
-                    # NOTE: After generate_pcp_metadata flattens the block_table,
-                    # we need to fold it back for the MTP proposer. The flattened
-                    # block_table has shape [num_decode_reqs_flatten + num_prefill_reqs, max_num_blocks]
-                    # where num_decode_reqs_flatten = sum(query_lens_d).
-                    # We need to restore it to [batch_size, max_num_blocks].
-                    # For decode requests, we fold by taking the first row of each repeated block.
-                    # For prefill requests, we keep them as is (they were not flattened).
-                    block_indices_decode = torch.cat([
-                        torch.tensor([0], dtype=torch.int32, device=self.device),
-                        torch.cumsum(query_lens_d, dim=0)[:-1].to(self.device)
+                    block_indices = torch.cat([
+                        torch.tensor([0], dtype=torch.int32),
+                        torch.cumsum(query_lens_d, dim=0)[:-1]
                     ])
-                    # The flattened block_table structure is:
-                    # [decode_0_rep_0, decode_0_rep_1, ..., decode_0_rep_n,
-                    #  decode_1_rep_0, ..., decode_m-1_rep_n,
-                    #  prefill_0, prefill_1, ..., prefill_k-1]
-                    # where n = decode_threshold - 1 = num_speculative_tokens
-                    num_decode_reqs_flatten = query_lens_d.sum().item()
-                    # Create a new block_table with the correct size
-                    original_block_table = attn_metadata_i.decode.block_table
-                    block_table_folded = torch.zeros(
-                        (batch_size, original_block_table.shape[1]),
-                        dtype=original_block_table.dtype,
-                        device=original_block_table.device
-                    )
-                    # Copy decode requests (folded)
-                    block_table_folded[:num_decode_reqs] = original_block_table[block_indices_decode]
-                    # Copy prefill requests (not folded, already at the end)
-                    if num_prefill_reqs > 0:
-                        block_table_folded[num_decode_reqs:] = original_block_table[num_decode_reqs_flatten:]
-                    attn_metadata_i.decode.block_table = block_table_folded
+                    attn_metadata_i.decode.block_table[:batch_size] = \
+                        attn_metadata_i.decode.block_table[block_indices]
+                    attn_metadata_i.decode.block_table = \
+                        attn_metadata_i.decode.block_table[:batch_size]
 
             input_ids = draft_token_ids_list[-1].int()
             positions += 1
