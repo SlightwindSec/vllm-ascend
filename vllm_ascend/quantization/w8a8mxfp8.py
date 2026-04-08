@@ -173,6 +173,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod:
             num_expert_group: Optional[int] = None,
             custom_routing_function: Optional[Callable] = None,
             scoring_func: str = "softmax",
+            routed_scaling_factor: float = 1.0,
             e_score_correction_bias: Optional[torch.Tensor] = None,
             is_prefill: bool = True,
             enable_force_load_balance: bool = True,
@@ -196,6 +197,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod:
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
+            routed_scaling_factor=routed_scaling_factor,
             global_num_experts=global_num_experts)
 
         # this is a naive implementation for experts load balance so as

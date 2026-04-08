@@ -183,6 +183,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = False,
@@ -214,6 +215,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 custom_routing_function=custom_routing_function,
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
+                routed_scaling_factor=routed_scaling_factor,
                 global_num_experts=global_num_experts)
         assert topk_ids is not None
         assert topk_weights is not None
