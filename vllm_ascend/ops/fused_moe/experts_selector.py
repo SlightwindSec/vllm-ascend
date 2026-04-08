@@ -98,6 +98,7 @@ def select_experts(hidden_states: torch.Tensor,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts,
+            routed_scaling_factor=routed_scaling_factor,
         )
     if mix_placement:
         shared_expert_routing_factor = 0.4
@@ -267,7 +268,8 @@ def _native_select_experts(
     custom_routing_function: Optional[Callable] = None,
     scoring_func: str = "softmax",
     e_score_correction_bias: Optional[torch.Tensor] = None,
-    global_num_experts: Optional[torch.Tensor] = None
+    global_num_experts: Optional[torch.Tensor] = None,
+    routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Select top-k experts based on router logits.
@@ -300,15 +302,14 @@ def _native_select_experts(
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
     if use_grouped_topk:
-        return _select_expert_use_group_topk(
+        topk_weights, topk_ids = _select_expert_use_group_topk(
             topk_weights=topk_weights,
             top_k=top_k,
             renormalize=renormalize,
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             e_score_correction_bias=e_score_correction_bias)
-
-    if custom_routing_function is not None:
+    elif custom_routing_function is not None:
         topk_weights, topk_ids = custom_routing_function(
             hidden_states=hidden_states,
             gating_output=router_logits,
@@ -317,14 +318,15 @@ def _native_select_experts(
             global_num_experts=global_num_experts)
         # Required by npu_moe_init_routing
         topk_ids = topk_ids.to(torch.int32)
-        return topk_weights, topk_ids
+    else:
+        topk_weights, topk_ids = topk_weights.topk(top_k, dim=-1)
+        topk_weights = topk_weights.to(hidden_states.dtype)
+        # Required by npu_moe_init_routing
+        topk_ids = topk_ids.to(torch.int32)
+        topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
-    topk_weights, topk_ids = topk_weights.topk(top_k, dim=-1)
-    topk_weights = topk_weights.to(hidden_states.dtype)
-
-    # Required by npu_moe_init_routing
-    topk_ids = topk_ids.to(torch.int32)
-    topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+    if routed_scaling_factor != 1.0:
+        topk_weights = topk_weights * routed_scaling_factor
 
     return topk_weights, topk_ids
 
