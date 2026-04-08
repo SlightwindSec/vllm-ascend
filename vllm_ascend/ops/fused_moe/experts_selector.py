@@ -326,7 +326,7 @@ def _native_select_experts(
         topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
     if routed_scaling_factor != 1.0:
-        topk_weights = topk_weights * routed_scaling_factor
+        topk_weights *= routed_scaling_factor
 
     return topk_weights, topk_ids
 

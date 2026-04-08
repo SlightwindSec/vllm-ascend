@@ -50,7 +50,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
         import torch_npu
         hccl_pg_options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
         # FIXME(linfeng): restore create_hccl_pg_options for more VRAM with `HCCL_BUFFSIZE`
-        hccl_pg_options.hccl_config = {"hccl_op_expansion_mode":5}
+        hccl_pg_options.hccl_config = {"hccl_op_expansion_mode":6}
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
