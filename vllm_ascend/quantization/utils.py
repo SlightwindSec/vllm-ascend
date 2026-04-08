@@ -119,3 +119,9 @@ def get_quant_method_modelslim(
             )
     raise NotImplementedError("Currently, vLLM Ascend only supports following quant types:" \
                                 f"{list(ASCEND_QUANTIZATION_METHOD_MAP.keys())}")
+
+
+def is_mx_quant_type(instance: Any) -> bool:
+    """Checks if the quantization method is a mix-precision type."""
+    MX_QUANT_TYPES = (AscendW8A8MXFP8DynamicLinearMethod, )
+    return isinstance(instance, MX_QUANT_TYPES)

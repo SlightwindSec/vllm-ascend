@@ -15,8 +15,7 @@
 # limitations under the License.
 #
 
-
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch_npu
@@ -29,24 +28,22 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 
 
-GROUP_SIZE = 32
-
-
 class AscendW8A8MXFP8DynamicLinearMethod:
     """Linear method for Ascend W8A8_DYNAMIC.
     """
     model_dtype = None
 
-
     def __init__(self):
-        self.transpose_weight = True
-
+        vllm_config = get_current_vllm_config()
+        self.group_size = vllm_config.quant_config.quant_description.get(
+            "group_size", 32)
 
     @staticmethod
     def get_weight(input_size: int, output_size: int,
                    params_dtype: torch.dtype) -> Dict[str, Any]:
         params_dict = {
-            "weight": torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)
+            "weight":
+            torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)
         }
         return params_dict
 
@@ -56,33 +53,35 @@ class AscendW8A8MXFP8DynamicLinearMethod:
 
     @staticmethod
     def get_perchannel_param(
-            output_size: int,
-            params_dtype: torch.dtype,
+        output_size: int,
+        params_dtype: torch.dtype,
     ) -> Dict[str, Any]:
         return {}
 
-    def get_pergroup_param(self, input_size: int, output_size: int,
-                           params_dtype: torch.dtype, layer_type: Optional[str] = None) -> Dict[str, Any]:
+    def get_pergroup_param(self,
+                           input_size: int,
+                           output_size: int,
+                           params_dtype: torch.dtype,
+                           layer_type: Optional[str] = None) -> Dict[str, Any]:
         params_dict = {}
-        params_dict["weight_scale"] = torch.empty(
-            output_size, input_size // GROUP_SIZE, dtype=torch.uint8)
+        params_dict["weight_scale"] = torch.empty(output_size,
+                                                  input_size //
+                                                  self.group_size,
+                                                  dtype=torch.uint8)
         return params_dict
 
-    @staticmethod
     def apply(
-            layer: torch.nn.Module,
-            x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
-            bias: Optional[torch.Tensor] = None,
-            tp_rank: Optional[int] = 0,
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
 
-        if x.dim() > 2:
-            x = x.view(-1, x.shape[-1])
-        quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
+        quantized_x, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
+            x, dst_type=torch.float8_e4m3fn)
         pertoken_scale = dynamic_scale
         output_dtype = x.dtype
-        if bias is not None:
-            bias = bias.to(torch.float32)
 
         output = torch_npu.npu_quant_matmul(
             quantized_x,
@@ -93,19 +92,16 @@ class AscendW8A8MXFP8DynamicLinearMethod:
             pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
             bias=bias,
             output_dtype=output_dtype,
-            group_sizes=[1, 1, GROUP_SIZE]
-        )
-        if "visual" in layer.prefix:
-            output = output.view(-1, 1, output.shape[-1])
+            group_sizes=[1, 1, self.group_size])
 
         return output
 
     def process_weights_after_loading(self, layer):
         n_dim, k_dim = layer.weight_scale.data.shape
-        layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim//2, 2)
-        if self.transpose_weight:
-            layer.weight.data = layer.weight.data.transpose(0, 1)
-            layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
+        layer.weight_scale.data = layer.weight_scale.data.reshape(
+            n_dim, k_dim // 2, 2)
+        layer.weight.data = layer.weight.data.transpose(0, 1)
+        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1)
 
 
 class AscendW8A8MXFP8DynamicFusedMoEMethod:
@@ -125,6 +121,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod:
                 and not vllm_config.model_config.enforce_eager
                 and not ascend_config.torchair_graph_config.enabled)
         self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
+        self.group_size = vllm_config.quant_config.quant_description.get(
+            "group_size", 32)
 
     @staticmethod
     def get_weight(num_experts: int, intermediate_size_per_partition: int,
@@ -150,12 +148,12 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod:
         param_dict["w13_weight_scale"] = torch.empty(
             num_experts,
             2 * intermediate_size_per_partition,
-            hidden_sizes // GROUP_SIZE,
+            hidden_sizes // 32,
             dtype=torch.uint8)
 
         param_dict["w2_weight_scale"] = torch.empty(num_experts,
                                                     hidden_sizes,
-                                                    intermediate_size_per_partition // GROUP_SIZE,
+                                                    intermediate_size_per_partition // 32,
                                                     dtype=torch.uint8)
         return param_dict
 
@@ -246,6 +244,3 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod:
                 1, 2)
             layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
             layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
-
-
-

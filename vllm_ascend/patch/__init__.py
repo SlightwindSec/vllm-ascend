@@ -106,20 +106,6 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
-# ** 7. File: platform/patch_compile_backend.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.compilation.backends.PiecewiseCompileInterpreter`
-#      `vllm.compilation.piecewise_backend.PiecewiseBackend`
-#    Why:
-#       vllm removed the compile graph for general shape, which caused operator fusion to fail.
-#       This issue affects the performance of model inference on Ascend.
-#    How：
-#       recover the compiled graph for dynamic_shape in PiecewiseBackend.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/24252
-#    Future Plan:
-#       Remove this patch when fix the problem.
-#
 # * Worker Patch:
 # ===============
 #
@@ -198,19 +184,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
 #
-# ** 7. File: worker/patch_weight_loader.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.linear.UnquantizedLinearMethod`
-#    Why:
-#       vLLM Ascend doesn't work with weight loader v2
-#    How：
-#       patch it to fix the bug.
-#    Related PR (if no, explain why):
-#       This is a bug by Ascend only.  We should fix it soon
-#    Future Plan:
-#       Remove this patch when the bug is fixed.
-#
-# ** 8. File: worker/patch_qwen3_next_mtp.py**
+# ** 7. File: worker/patch_qwen3_next_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.utils.bind_kv_cache`
 #    Why:
@@ -223,7 +197,7 @@
 #    Future Plan:
 #       Remove this patch after discussing with vllm community and adapting bind_kv_cache to npu.
 #
-# ** 9. File: worker/patch_module.py**
+# ** 8. File: worker/patch_module.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
 #    Why:
@@ -239,7 +213,7 @@
 #       Remove this patch when bool is supported in 'torch.argsort' func of npu.
 #       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
 #
-# ** 10. File: worker/patch_rejection_sampler.py**
+# ** 9. File: worker/patch_rejection_sampler.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.sample.rejection_sampler`
 #    Why:
@@ -255,7 +229,7 @@
 #           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
 #       2. make these functions as costom op, then remove AscendRejectionSampler
 #
-# ** 11.File: worker/patch_qwen3_next.py**
+# ** 10.File: worker/patch_qwen3_next.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet.forward`
 #    Why:
@@ -267,7 +241,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
 #
-# ** 12. File: worker/patch_qwen3_next.py**
+# ** 11. File: worker/patch_qwen3_next.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet._forward_core`
 #    Why:
@@ -288,4 +262,72 @@
 #       https://github.com/vllm-project/vllm/pull/31002
 #    Future Plan:
 #       Remove this patch when vLLM support these operators.
+#
+# ** File: worker/patch_deepseekv3.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#    1. vllm.model_executor.models.deepseek_v2 (DeepseekV2 & DeepseekMoE related logic)
+#    Why:
+#      The mix placement feature requires modifying the loading format of DeepseekV3 shared expert weights and adjusting the inference path of DeepseekMoE.
+#    How：
+#      Patch the weight loading logic of DeepseekV3 to adapt to the mix placement storage format, and modify the forward inference path of DeepseekMoE to support the mix placement feature.
+#    Related PR (if no, explain why):
+#      https://github.com/vllm-project/vllm/pull/4881
+#    Future Plan:
+#      Remove this patch after the mix placement feature is natively implemented in the official vllm codebase.
+# ** 12. File: platform/patch_lor_model_manager.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.lora.model_manager.LoRAModelManager.__init__`
+#    Why:
+#       Adapted for vLLM v0.13.0, added lora_config parameter to the 'get_punica_wrapper' function.
+#    How：
+#       Add a conditional check: use a custom operator when rank < 128, otherwise use the vllm operator.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/31408
+#    Future Plan:
+#       Keep this patch in vllm-ascend v0.13.0.
+#
+# ** 13. File: platform/patch_kv_cache_coordinator.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator`
+#    Why:
+#       Add this patch to support MultiBlockPool.
+#    How：
+#       Add a new branch to make `KVCacheCoordinatorWithMultiPool` could be routed by. This will only take effect when USE_MULTI_BLOCK_POOL is True.
+#    Related PR (if no, explain why):
+#       Currently vLLM doesn't support MultiBlockPool, will raise a pr soon.
+#    Future Plan:
+#       Keep this patch in vllm-ascend v0.13.0.
+#
+# ** 14. File: platform/patch_kv_cache_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.kv_cache_utils.get_kv_cache_groups`
+#    Why:
+#       Add this patch to support kvcache group with different page sizes in the specs.
+#    How：
+#       Implement a new func to make KVCacheGroupSpec for different page sizes without unifying their page sizes.
+#    Related PR (if no, explain why):
+#       Currently vLLM doesn't support this feature, will raise a pr soon.
+#    Future Plan:
+#       Keep this patch in vllm-ascend v0.13.0.
+#   2. `vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups`
+#    Why:
+#       Add this patch to create KVCacheConfig to support kvcache group with different page size in the specs.
+#    How：
+#       Add a new branch to avoid shared the memory pools between the groups.
+#    Related PR (if no, explain why):
+#       Currently vLLM doesn't support this feature, will raise a pr soon.
+#    Future Plan:
+#       Keep this patch in vllm-ascend v0.13.0.
+#
+# ** 15. File: platform/patch_vllm_config.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.VllmConfig.__post_init__`
+#    Why:
+#       Add this patch to enable hybrid kv cache in Prefill Disaggregation scenario.
+#    How：
+#       Disable `need_disable_hybrid_kv_cache_manager` if Prefill Disaggregation is enabled.
+#    Related PR (if no, explain why):
+#       Currently vLLM doesn't support this feature, will raise a pr soon.
+#    Future Plan:
+#       Keep this patch in vllm-ascend v0.13.0.
 #

@@ -14,7 +14,8 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (AscendDeviceType, enable_sp, flashcomm2_enable,
                                get_ascend_device_type, has_layer_idx,
-                               is_moe_model)
+                               is_drafter_moe_model, is_moe_model,
+                               speculative_enable_dispatch_gmm_combine_decode)
 
 
 class MoECommType(Enum):
@@ -36,7 +37,8 @@ def set_ascend_forward_context(
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         batch_descriptor: Optional[BatchDescriptor] = None,
         model_instance: torch.nn.Module = None,
-        is_draft_model=False):
+        is_draft_model=False,
+        is_multimodal_model=False):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -67,17 +69,27 @@ def set_ascend_forward_context(
         # due to multiple warmups before actual capturing
         forward_context.capturing = False
 
+        # TODO: remove it when torch_npu.npu_mm_reduce_scatter_base supports tp_size >= 16.
+        mmrs_fusion = tp_world_size <= 8
+
         # set for sequence parallelism, 1000 is the batch size concurrency threshold for enabling the flashcomm_v1 or sequence_parallelism feature.
         # Currently, it is an empirical value. In normal scenarios, if the concurrency exceeds this threshold,
         # the performance benefits can be maximized. Conversely, if the concurrency is below the threshold,
         # the performance may degrade due to the switching of communication methods.
-        mmrs_fusion = True
-        if is_moe_model(vllm_config):
+        # main model and drafter model may have different architecture
+        is_context_moe_model = is_drafter_moe_model(vllm_config) \
+            if is_draft_model else is_moe_model(vllm_config)
+        if is_context_moe_model:
             sp_enabled = enable_sp(vllm_config) and num_tokens is not None
             mmrs_fusion = False
+        elif is_draft_model:
+            # TODO: for dense drafter, `sp` is redundant and is not compatible with `dp` and `graph`.
+            # Disable it to avoid more problems.
+            sp_enabled = False
         else:
             sp_enabled = enable_sp(vllm_config) and \
                 num_tokens is not None and num_tokens > 1000
+
         forward_context.mmrs_fusion = mmrs_fusion
         forward_context.num_tokens = num_tokens
         forward_context.sp_enabled = sp_enabled
@@ -93,6 +105,7 @@ def set_ascend_forward_context(
 
         # set this for rope forward_oot using
         forward_context.is_first_layer = True
+        forward_context.is_multimodal_model = is_multimodal_model
 
         # set layer_idx to enable optimization features that depend on this information.
         # This is only applicable to models that contain these necessary attributes.
@@ -153,8 +166,6 @@ def set_ascend_forward_context(
 
 _mc2_tokens_capacity: Optional[int] = None
 _reserved_mc2_mask: Optional[torch.Tensor] = None
-_sin: Optional[torch.Tensor] = None
-_cos: Optional[torch.Tensor] = None
 
 
 def set_mc2_tokens_capacity(vllm_config, max_num_reqs,
@@ -223,8 +234,8 @@ def select_moe_comm_method(num_tokens: int,
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
     quant_type = getattr(
-        vllm_config.model_config.hf_config, 'moe_quantize',
-        getattr(vllm_config.model_config.hf_config, 'quantize', None))
+        vllm_config.model_config.hf_text_config, 'moe_quantize',
+        getattr(vllm_config.model_config.hf_text_config, 'quantize', None))
 
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group(
     ).world_size == 1:
@@ -241,21 +252,22 @@ def select_moe_comm_method(num_tokens: int,
         ascend_config = get_ascend_config()
         dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
-        # TODO: drop dynamic_eplb guard when dispatch_gmm_combine_decode supports tensor list inputs
-        # TODO: add guard for dispatch_gmm_combine_decode when mtp uses float while moe uses w8a8
-        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 and quant_type == "w8a8_dynamic" and (
-            not dynamic_eplb)
+        # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
+        fused_mc2_enable = envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 and quant_type == "w8a8_dynamic"
+        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and (
+            not is_draft_model) and (not dynamic_eplb)
         if num_tokens <= mc2_tokens_capacity:
             fused_decode_enable = fused_mc2_enable
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
-                fused_decode_enable = fused_mc2_enable and get_ep_group(
-                ).world_size <= 16 and (not is_draft_model)
+                fused_decode_enable = fused_mc2_enable and dispatch_ffn_combine_enable
+            elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
+                fused_decode_enable = fused_mc2_enable and \
+                    speculative_enable_dispatch_gmm_combine_decode(vllm_config)
             moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
         else:
             fused_prefill_enable = fused_mc2_enable
             if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
-                fused_prefill_enable = fused_mc2_enable and get_ep_group(
-                ).world_size <= 16 and (not is_draft_model)
+                fused_prefill_enable = fused_mc2_enable and dispatch_ffn_combine_enable
             elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
                 fused_prefill_enable = False
             moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL

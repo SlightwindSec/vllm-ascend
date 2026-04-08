@@ -37,6 +37,9 @@ class TestNPUPlatform(TestBase):
 
     def setUp(self):
         self.platform = NPUPlatform()
+        self.platform.supported_quantization[:] = [
+            "ascend", "compressed-tensors"
+        ]
 
     def test_class_variables(self):
         self.assertEqual(NPUPlatform._enum, PlatformEnum.OOT)
@@ -120,118 +123,9 @@ class TestNPUPlatform(TestBase):
         self.assertIsNone(self.platform.inference_mode())
         mock_inference_mode.assert_called_once()
 
-    @patch("torch.npu.set_device")
-    def test_set_device_normal(self, mock_set_device):
-        device = torch.device("npu:0")
-        self.platform.set_device(device)
-        mock_set_device.assert_called_once_with(device)
-
-    @patch("torch.npu.set_device",
-           side_effect=RuntimeError("Device not available"))
-    def test_set_device_failure(self, mock_set_device):
-        device = torch.device("npu:0")
-        with self.assertRaises(RuntimeError):
-            self.platform.set_device(device)
-        mock_set_device.assert_called_once_with(device)
-
-    @patch("torch.npu.empty_cache")
-    def test_empty_cache_normal(self, mock_empty_cache):
-        self.platform.empty_cache()
-        mock_empty_cache.assert_called_once()
-
-    @patch("torch.npu.empty_cache",
-           side_effect=RuntimeError("Cache clearing failed"))
-    def test_empty_cache_failure(self, mock_empty_cache):
-        with self.assertRaises(RuntimeError):
-            self.platform.empty_cache()
-        mock_empty_cache.assert_called_once()
-
-    @patch("torch.npu.synchronize")
-    def test_synchronize_normal(self, mock_synchronize):
-        self.platform.synchronize()
-        mock_synchronize.assert_called_once()
-
-    @patch("torch.npu.synchronize",
-           side_effect=RuntimeError("Synchronization failed"))
-    def test_synchronize_failure(self, mock_synchronize):
-        with self.assertRaises(RuntimeError):
-            self.platform.synchronize()
-        mock_synchronize.assert_called_once()
-
-    @patch("torch.npu.mem_get_info")
-    def test_mem_get_info_normal(self, mock_mem_get_info):
-        free_memory_size = 1024
-        total_memory_size = 2048
-        memory_info = (free_memory_size, total_memory_size)
-        mock_mem_get_info.return_value = memory_info
-        result = self.platform.mem_get_info()
-        self.assertIsInstance(result, tuple)
-        self.assertEqual(len(result), 2)
-        self.assertEqual(result, memory_info)
-        mock_mem_get_info.assert_called_once()
-
-    @patch("torch.npu.mem_get_info",
-           side_effect=RuntimeError("NPU not available"))
-    def test_mem_get_info_failure(self, mock_mem_get_info):
-        with self.assertRaises(RuntimeError):
-            self.platform.mem_get_info()
-        mock_mem_get_info.assert_called_once()
-
-    @patch("gc.collect")
-    @patch("torch.npu.empty_cache")
-    @patch("torch.npu.reset_peak_memory_stats")
-    def test_clear_npu_memory_normal(self, mock_reset_stats, mock_empty_cache,
-                                     mock_gc_collect):
-        self.platform.clear_npu_memory()
-
-        mock_gc_collect.assert_called_once()
-        mock_empty_cache.assert_called_once()
-        mock_reset_stats.assert_called_once()
-
-    @patch("gc.collect", side_effect=Exception("GC failed"))
-    @patch("torch.npu.empty_cache")
-    @patch("torch.npu.reset_peak_memory_stats")
-    def test_clear_npu_memory_gc_collect_failure(self, mock_reset_stats,
-                                                 mock_empty_cache,
-                                                 mock_gc_collect):
-        with self.assertRaises(Exception):
-            self.platform.clear_npu_memory()
-
-        mock_gc_collect.assert_called_once()
-        mock_empty_cache.assert_not_called()
-        mock_reset_stats.assert_not_called()
-
-    @patch("gc.collect")
-    @patch("torch.npu.empty_cache",
-           side_effect=RuntimeError("Cache clear failed"))
-    @patch("torch.npu.reset_peak_memory_stats")
-    def test_clear_npu_memory_empty_cache_failure(self, mock_reset_stats,
-                                                  mock_empty_cache,
-                                                  mock_gc_collect):
-        with self.assertRaises(RuntimeError):
-            self.platform.clear_npu_memory()
-
-        mock_gc_collect.assert_called_once()
-        mock_empty_cache.assert_called_once()
-        mock_reset_stats.assert_not_called()
-
-    @patch("gc.collect")
-    @patch("torch.npu.empty_cache")
-    @patch("torch.npu.reset_peak_memory_stats",
-           side_effect=RuntimeError("Reset failed"))
-    def test_clear_npu_memory_reset_stats_failure(self, mock_reset_stats,
-                                                  mock_empty_cache,
-                                                  mock_gc_collect):
-        with self.assertRaises(RuntimeError):
-            self.platform.clear_npu_memory()
-
-        mock_gc_collect.assert_called_once()
-        mock_empty_cache.assert_called_once()
-        mock_reset_stats.assert_called_once()
-
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.utils.update_aclgraph_sizes")
-    @patch('vllm_ascend.utils.get_ascend_device_type',
+    @patch("vllm_ascend.utils.get_ascend_device_type",
            return_value=AscendDeviceType.A3)
     @patch("os.environ", {})
     @patch(
@@ -263,7 +157,7 @@ class TestNPUPlatform(TestBase):
 
         mock_init_ascend.assert_called_once_with(vllm_config)
 
-    @patch('vllm_ascend.utils.get_ascend_device_type',
+    @patch("vllm_ascend.utils.get_ascend_device_type",
            return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
@@ -285,10 +179,15 @@ class TestNPUPlatform(TestBase):
             from vllm_ascend import platform
 
             importlib.reload(platform)
-            self.platform.check_and_update_config(vllm_config)
+            self.platform = platform.NPUPlatform()
+
+            with patch.object(platform.NPUPlatform,
+                              "_fix_incompatible_config"):
+                self.platform.check_and_update_config(vllm_config)
+
         self.assertTrue("Model config is missing" in cm.output[0])
 
-    @patch('vllm_ascend.utils.get_ascend_device_type',
+    @patch("vllm_ascend.utils.get_ascend_device_type",
            return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
@@ -310,7 +209,12 @@ class TestNPUPlatform(TestBase):
             from vllm_ascend import platform
 
             importlib.reload(platform)
-            self.platform.check_and_update_config(vllm_config)
+            self.platform = platform.NPUPlatform()
+
+            with patch.object(platform.NPUPlatform,
+                              "_fix_incompatible_config"):
+                self.platform.check_and_update_config(vllm_config)
+
         self.assertTrue("Compilation disabled, using eager mode by default" in
                         cm.output[0])
 
@@ -324,17 +228,14 @@ class TestNPUPlatform(TestBase):
             CUDAGraphMode.NONE,
         )
 
-    @patch('vllm_ascend.utils.get_ascend_device_type',
+    @patch("vllm_ascend.utils.get_ascend_device_type",
            return_value=AscendDeviceType.A3)
-    @patch("vllm_ascend.utils.update_default_aclgraph_sizes")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
         "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"
     )
     def test_check_and_update_config_unsupported_compilation_level(
-            self, mock_init_recompute, mock_init_ascend, mock_update_default,
-            mock_soc_version):
-        mock_update_default.return_value = MagicMock()
+            self, mock_init_recompute, mock_init_ascend, mock_soc_version):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -351,7 +252,12 @@ class TestNPUPlatform(TestBase):
             from vllm_ascend import platform
 
             importlib.reload(platform)
-            self.platform.check_and_update_config(vllm_config)
+            self.platform = platform.NPUPlatform()
+
+            with patch.object(platform.NPUPlatform,
+                              "_fix_incompatible_config"):
+                self.platform.check_and_update_config(vllm_config)
+
             self.assertTrue("NPU does not support" in cm.output[0])
 
             self.assertEqual(
@@ -365,7 +271,7 @@ class TestNPUPlatform(TestBase):
 
     @pytest.mark.skip(
         "Revert me when vllm support setting cudagraph_mode on oot platform")
-    @patch('vllm_ascend.utils.get_ascend_device_type',
+    @patch("vllm_ascend.utils.get_ascend_device_type",
            return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     def test_check_and_update_config_unsupported_cudagraph_mode(
@@ -394,7 +300,7 @@ class TestNPUPlatform(TestBase):
                 CUDAGraphMode.NONE,
             )
 
-    @patch('vllm_ascend.utils.get_ascend_device_type',
+    @patch("vllm_ascend.utils.get_ascend_device_type",
            return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
@@ -421,7 +327,7 @@ class TestNPUPlatform(TestBase):
 
         self.assertEqual(vllm_config.cache_config.block_size, 128)
 
-    @patch('vllm_ascend.utils.get_ascend_device_type',
+    @patch("vllm_ascend.utils.get_ascend_device_type",
            return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
@@ -460,7 +366,7 @@ class TestNPUPlatform(TestBase):
         )
 
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch('vllm_ascend.utils.get_ascend_device_type',
+    @patch("vllm_ascend.utils.get_ascend_device_type",
            return_value=AscendDeviceType._310P)
     @patch(
         "vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config"

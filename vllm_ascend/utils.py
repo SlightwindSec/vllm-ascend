@@ -21,8 +21,10 @@ import atexit
 import functools
 import math
 import os
+import re
 from contextlib import contextmanager, nullcontext
 from enum import Enum
+from functools import lru_cache
 from threading import Lock
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
+COMPILATION_PASS_KEY = "graph_fusion_manager"
 ASCEND_QUANTIZATION_METHOD = "ascend"
 COMPRESSED_TENSORS_METHOD = "compressed-tensors"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
@@ -55,10 +58,13 @@ _PREFETCH_STREAM = None
 _WEIGHT_PREFETCH_METHOD = None
 _GLOBAL_STREAM = None
 _SHARED_EXPERTS_CALCULATION_STREAM = None
+_CP_CHUNKEDPREFILL_COMM_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _IS_MOE_MODEL = None
+_IS_DRAFTER_MOE_MODEL = None
+_IS_OMNI_MODEL = None
 _IS_VL_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
@@ -340,6 +346,13 @@ def shared_experts_calculation_stream() -> torch.npu.Stream:
     return _SHARED_EXPERTS_CALCULATION_STREAM
 
 
+def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
+    global _CP_CHUNKEDPREFILL_COMM_STREAM
+    if _CP_CHUNKEDPREFILL_COMM_STREAM is None:
+        _CP_CHUNKEDPREFILL_COMM_STREAM = torch_npu.npu.Stream()
+    return _CP_CHUNKEDPREFILL_COMM_STREAM
+
+
 def adapt_patch(is_global_patch: bool = False):
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
@@ -417,61 +430,6 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig,
     vllm_config.compilation_config.post_init_cudagraph_sizes()
 
 
-def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
-    """
-    Check whether it is vLLM default capture sizes.
-    """
-
-    max_cudagraph_capture_size = \
-        vllm_config.compilation_config.max_cudagraph_capture_size
-    cudagraph_capture_sizes = [
-        i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
-    ]
-    if max_cudagraph_capture_size >= 8:
-        # Step size 8 for small batch sizes, up to 256(not included)
-        cudagraph_capture_sizes += list(
-            range(8, min(max_cudagraph_capture_size + 1, 256), 8))
-    if max_cudagraph_capture_size >= 256:
-        # Step size 16 for larger batch sizes
-        cudagraph_capture_sizes += list(
-            range(256, max_cudagraph_capture_size + 1, 16))
-    # in newer version, vLLM use ascending order of cudagraph_capture_sizes.
-    target_cudagraph_capture_sizes = sorted(cudagraph_capture_sizes)
-    if target_cudagraph_capture_sizes == \
-            vllm_config.compilation_config.cudagraph_capture_sizes:
-        return True
-
-    return False
-
-
-def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
-    """
-    Update ACL graph default capture sizes, so that new sizes
-    are more friendly to ascend ops && hardware.
-    """
-
-    if vllm_config.model_config is None or \
-        vllm_config.model_config.enforce_eager or \
-        not _is_default_capture_sizes(vllm_config):
-        return
-
-    # modify the default capture_sizes for Qwen3-MoE models on dp settings.
-    # this is mainly because performance of _npu_paged_attention might degrades
-    # on special shapes.
-    # TODO(Angazenn): we will remove this once _npu_paged_attention is fully
-    # replaced by npu_fused_infer_attention_score which does not contain such bugs.
-    if vllm_config.model_config and vllm_config.model_config.hf_config.model_type == "qwen3_moe" \
-        and vllm_config.parallel_config.tensor_parallel_size == 1 \
-        and vllm_config.parallel_config.data_parallel_size > 1 :
-
-        max_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
-        new_cudagraph_capture_sizes = [1, 2, 5, 10, 15, 20] + [
-            i for i in range(24, max_capture_size + 1, 8)
-        ]
-        update_cudagraph_capture_sizes(vllm_config,
-                                       new_cudagraph_capture_sizes)
-
-
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     """Update ACL graph capture sizes based on hardware limitations"""
     # NOTE: Currently, we can only capture 1800 graphs at most,
@@ -481,6 +439,9 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # Maximum number of graphs that can be captured by ACL Graph
     # TODO: Find out whether we need to solve allreduce function
     MAX_CAPTURE_SIZE = 1800
+
+    # enable pcp or dcp will add new communication and consume additional approximately less than 100 streams
+    CP_ADDITIONAL_STREAM_NUM = 100
 
     # Store original configuration and temporarily clear it
     compilation_config = vllm_config.compilation_config
@@ -495,7 +456,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         )
 
         return
-    hf_config = vllm_config.model_config.hf_config
+    hf_config = vllm_config.model_config.hf_text_config
     if hasattr(hf_config, 'num_hidden_layers'):
         num_hidden_layers = hf_config.num_hidden_layers
     else:
@@ -538,6 +499,12 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             "Calculated maximum supported batch sizes for ACL graph: %s",
             max_num_batch_sizes)
     else:
+        # enable pcp or dcp will add new communication and consume additional approximately less than 100 streams
+        if parallel_config.prefill_context_parallel_size > 1:
+            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - CP_ADDITIONAL_STREAM_NUM
+        if parallel_config.decode_context_parallel_size > 1:
+            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - CP_ADDITIONAL_STREAM_NUM
+
         # The above describes an empirical formula applicable to the A2 hardware.
         # Under this configuration, HCCL employs the FFTS+ method for execution unfolding,
         # which adds only 1 concurrent stream without consuming collective communication execution unfolding streams.
@@ -794,6 +761,10 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
         if not _ENABLE_SP:
             return _ENABLE_SP
 
+        assert not is_omni_model(vllm_config), \
+            "Currently, Omni models do not support FLASHCOMM in vllm-ascend." \
+            "We will fix this in the future. Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0."
+
         assert vllm_config.parallel_config.tensor_parallel_size > 1, \
             "Flash Comm v1 (Sequence Parallelism) is only supported when tp_size > 1."
 
@@ -818,9 +789,45 @@ def is_moe_model(vllm_config: VllmConfig):
     """Checks if the model is a MoE model by config"""
     global _IS_MOE_MODEL
     if _IS_MOE_MODEL is None:
-        model_configs = vllm_config.model_config.hf_config.to_dict()
+        model_configs = vllm_config.model_config.hf_text_config.to_dict()
         _IS_MOE_MODEL = _is_contain_expert(model_configs)
     return _IS_MOE_MODEL
+
+
+def is_drafter_moe_model(vllm_config: VllmConfig):
+    """Checks if the drafter model is a MoE model by config"""
+    global _IS_DRAFTER_MOE_MODEL
+    if _IS_DRAFTER_MOE_MODEL is None:
+        model_configs = vllm_config.speculative_config.draft_model_config.hf_text_config \
+            .to_dict()
+        _IS_DRAFTER_MOE_MODEL = _is_contain_expert(model_configs)
+    return _IS_DRAFTER_MOE_MODEL
+
+
+def speculative_enable_dispatch_gmm_combine_decode(
+        vllm_config: VllmConfig) -> bool:
+    """When draft contains MOE Arch and non-w8a8, disable dispatch_gmm_combine_decode."""
+    if vllm_config.speculative_config is None:
+        return True
+    speculative_method = getattr(vllm_config.speculative_config, "method",
+                                 None)
+    if speculative_method in [None, "ngram", "suffix"]:
+        return True
+    if speculative_method in ["eagle", "eagle3"]:
+        if is_drafter_moe_model(vllm_config):
+            draft_model_config = vllm_config.speculative_config.draft_model_config
+            hf_text_config = draft_model_config.hf_text_config
+            quant_type = getattr(hf_text_config, "moe_quantize", None)
+            if quant_type is None:
+                quant_type = getattr(hf_text_config, "quantize", None)
+            return quant_type == "w8a8_dynamic"
+        else:
+            return True
+    if speculative_method == "mtp":
+        mtp_quant_type = getattr(vllm_config.model_config.hf_text_config,
+                                 "mtp_quantize", None)
+        return mtp_quant_type == "w8a8_dynamic"
+    return False
 
 
 def _is_contain_expert(config: Any):
@@ -831,6 +838,17 @@ def _is_contain_expert(config: Any):
             if _is_contain_expert(v):
                 return True
     return False
+
+
+def is_omni_model(vllm_config: VllmConfig):
+    """Checks if the model is an Omni model by config"""
+    global _IS_OMNI_MODEL
+    if _IS_OMNI_MODEL is None and vllm_config and vllm_config.model_config:
+        hf_config = vllm_config.model_config.hf_config.to_dict()
+        if "thinker_config" in hf_config:
+            # Qwen-Omni models
+            _IS_OMNI_MODEL = True
+    return _IS_OMNI_MODEL
 
 
 def is_vl_model(vllm_config: VllmConfig):
@@ -850,7 +868,7 @@ def has_rope(vllm_config: VllmConfig):
     """Checks if the model uses rope."""
     global _HAS_ROPE
     if _HAS_ROPE is None and vllm_config and vllm_config.model_config:
-        hf_config = vllm_config.model_config.hf_config.to_dict()
+        hf_config = vllm_config.model_config.hf_text_config.to_dict()
         _HAS_ROPE = "rope_parameters" in hf_config
     return _HAS_ROPE
 
@@ -981,22 +999,34 @@ def flashcomm2_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
 
 
-def flashcomm2_o_shared_enabled() -> bool:
-    return envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED
+def o_shard_enable() -> bool:
+    layer_sharding = get_ascend_config().layer_sharding
+    if layer_sharding is None:
+        return False
+    return "o_proj" in layer_sharding
 
 
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
-    flashcomm2_oproj_shared = flashcomm2_o_shared_enabled()
 
     if not flashcomm2_enable():
-        flashcomm2_oproj_shared = False
-        return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
+        return 0
 
     logger.info(
-        f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = {flashcomm2_oproj_tp_size} and oproj_shared_enabled = {flashcomm2_oproj_shared}"
+        f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = {flashcomm2_oproj_tp_size}"
     )
+
+    layer_sharding = ascend_config.layer_sharding or []
+    if layer_sharding:
+        if layer_sharding == ["o_proj"]:
+            logger.info_once(
+                "Enable FLASHCOMM2 with o_proj layer sharding for reduced memory consumption."
+            )
+        else:
+            raise ValueError(
+                "FLASHCOMM2 only supports 'o_proj' as the sole layer sharding configuration! "
+                f"Found invalid layer_sharding: {layer_sharding}")
     if not envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
         logger.warning_once(
             "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
@@ -1019,13 +1049,10 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
         )
     if vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer:
         raise AssertionError(
-            "FLASHCOMM2 primarily targets P-scenario deployments, "
-            "with additional support for hybrid deployment scenarios. "
-            "It is not applicable in D-scenario environments.")
-    if flashcomm2_oproj_shared:
-        logger.info("Enable FLASHCOMM2 with oproj_shared.")
+            "FLASHCOMM2 primarily targets P-scenario deployments, with additional support for hybrid deployment scenarios. It is not applicable in D-scenario environments."
+        )
 
-    return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
+    return flashcomm2_oproj_tp_size
 
 
 def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
@@ -1066,7 +1093,7 @@ def refresh_block_size(vllm_config):
         return
 
     # TODO(MengqingCao): Remove the model_type check, after resolving the hidden error in get_kv_cache_groups.
-    if not model_config.hf_config.model_type == "qwen3_next" and cache_config.block_size != 128:
+    if not model_config.hf_text_config.model_type == "qwen3_next" and cache_config.block_size != 128:
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
             logger.info(
                 "Block size is set to 128 if prefix cache or chunked prefill is enabled."
@@ -1079,11 +1106,6 @@ def dispose_layer(layer: Any):
         attr_value = getattr(layer, attr_name)
         if isinstance(attr_value, torch.Tensor):
             dispose_tensor(attr_value)
-
-
-def replace_layer(original_layer: Any, new_layer: Any):
-    original_layer.__class__ = new_layer.__class__
-    original_layer.__dict__ = new_layer.__dict__
 
 
 def check_kv_extra_config(vllm_config):
@@ -1115,3 +1137,48 @@ def check_kv_extra_config(vllm_config):
         _check(
             "decode",
             vllm_config.kv_transfer_config.get_from_extra_config("decode", {}))
+
+
+def singleton(cls):
+    instances = {}
+
+    def get_instance(*args, **kwargs):
+        if cls not in instances:
+            instances[cls] = cls(*args, **kwargs)
+        return instances[cls]
+
+    return get_instance
+
+
+#TODO: Temporarily use enable_sp to enable the dsa_cp feature of ds32. and subsequent updates will introduce new interfaces. --zzhx1
+@lru_cache(maxsize=1)
+def enable_dsa_cp() -> bool:
+    from vllm.config import get_current_vllm_config
+    vllm_config = get_current_vllm_config()
+    is_ds_v32 = hasattr(
+        vllm_config.model_config, "hf_text_config") and hasattr(
+            vllm_config.model_config.hf_text_config, "index_topk")
+    if is_ds_v32 and enable_sp():
+        return True
+    return False
+
+
+@lru_cache(maxsize=1)
+def enable_dsa_cp_with_layer_shard() -> bool:
+    if not enable_dsa_cp():
+        return False
+    from vllm.config import get_current_vllm_config
+    vllm_config = get_current_vllm_config()
+    is_prefill_instance = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_producer
+    return is_prefill_instance
+
+
+def parse_layer_idx(prefix: str) -> Optional[int]:
+    pattern = r'layers\.(\d+)'
+    match = re.search(pattern, prefix)
+    if match:
+        layer_idx = int(match.group(1))
+    else:
+        layer_idx = None
+
+    return layer_idx

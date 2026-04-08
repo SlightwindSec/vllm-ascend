@@ -12,6 +12,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import npu_stream_switch, prefetch_stream
 
@@ -40,12 +41,15 @@ def _maybe_chunk_residual_impl(x: torch.Tensor,
 def _maybe_all_gather_and_maybe_unpad_impl(
         x: torch.Tensor,
         label: bool,
-        is_ep_comm: bool = False) -> torch.Tensor:
+        is_ep_comm: bool = False,
+        is_first_allgather: bool = False) -> torch.Tensor:
     try:
         forward_context = get_forward_context()
     except AssertionError:
         return x
 
+    if forward_context.is_multimodal_model and is_first_allgather:
+        return x
     sp_enabled = forward_context.sp_enabled
     if sp_enabled and label:
         dp_metadata = forward_context.dp_metadata
@@ -139,9 +143,14 @@ def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
 def _maybe_all_gather_and_maybe_unpad_fake(
         x: torch.Tensor,
         label: bool,
-        is_ep_comm: bool = False) -> torch.Tensor:
+        is_ep_comm: bool = False,
+        is_first_allgather: bool = False) -> torch.Tensor:
+    forward_context = get_forward_context()
 
-    if get_forward_context().sp_enabled and label:
+    if forward_context.is_multimodal_model and is_first_allgather:
+        return x
+
+    if forward_context.sp_enabled and label:
         return torch.empty(
             (x.shape[0] * get_tensor_model_parallel_world_size(),
              *x.shape[1:]),
@@ -304,9 +313,20 @@ def _quantize_impl_fake(in_tensor: torch.Tensor, input_scale: torch.Tensor,
                                   input_offset, torch.qint8, -1, False)
 
 
+def _rope_forward_oot_impl_fake(
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        head_dim: int,
+        rotary_dim: int,
+        is_neox_style: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
+    return query, key
+
+
 direct_register_custom_op(op_name="maybe_chunk_residual",
                           op_func=_maybe_chunk_residual_impl,
-                          fake_impl=lambda x, residual: x,
+                          fake_impl=lambda x, residual: torch.empty_like(x),
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
@@ -367,5 +387,11 @@ direct_register_custom_op(op_name="matmul_and_reduce",
 direct_register_custom_op(op_name="quantize",
                           op_func=_quantize_impl,
                           fake_impl=_quantize_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+
+direct_register_custom_op(op_name="rope_forward_oot",
+                          op_func=rope_forward_oot,
+                          fake_impl=_rope_forward_oot_impl_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")

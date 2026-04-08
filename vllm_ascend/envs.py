@@ -36,6 +36,13 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Release, Debug, RelWithDebugInfo. If not set, the default value is Release.
     "CMAKE_BUILD_TYPE":
     lambda: os.getenv("CMAKE_BUILD_TYPE"),
+    # Whether to compile custom kernels. If not set, the default value is True.
+    # If set to False, the custom kernels will not be compiled.
+    # This configuration option should only be set to False when running UT
+    # scenarios in an environment without an NPU. Do not set it to False in
+    # other scenarios.
+    "COMPILE_CUSTOM_KERNELS":
+    lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
     "CXX_COMPILER":
@@ -92,11 +99,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # between this feature and FLASHCOMM1, please refer to the feature guide in the documentation.
     "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE":
     lambda: int(os.getenv("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)),
-    # This feature is bound to the previous VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE, and it adds the shared weight feature,
-    # which can eliminate redundant storage of weights. More detailed information can be found in PR#4188.
-    # We recommend that you enable it when Flashcomm2 is enabled and the VRAM capacity is limited.
-    "VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED", "0"))),
     # Whether to enable MLP weight prefetch, only used in small concurrency.
     "VLLM_ASCEND_ENABLE_PREFETCH_MLP":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", '0'))),
@@ -128,10 +130,10 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to enable fused mc2(`dispatch_gmm_combine_decode`/`dispatch_ffn_combine` operator)
     # 0, or not set: default ALLTOALL and MC2 will be used.
     # 1: ALLTOALL and MC2 might be replaced by `dispatch_ffn_combine` operator.
-    # `dispatch_ffn_combine` can be used only for moe layer with W8A8, EP<=16, non-mtp, non-dynamic-eplb.
+    # `dispatch_ffn_combine` can be used only for moe layer with W8A8, EP<=32, non-mtp, non-dynamic-eplb.
     # 2: MC2 might be replaced by `dispatch_gmm_combine_decode` operator.
     # `dispatch_gmm_combine_decode` can be used only for **decode node** moe layer
-    # with W8A8, non-dynamic-eplb. And MTP layer must be W8A8.
+    # with W8A8. And MTP layer must be W8A8.
     "VLLM_ASCEND_ENABLE_FUSED_MC2":
     lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", '0')),
     # Whether to anbale balance scheduling

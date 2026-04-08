@@ -16,7 +16,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Dict, Optional
 
 import torch
 from vllm.forward_context import get_forward_context
@@ -26,11 +27,11 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
-    PrepareAndFinalizeWithAll2All, PrepareAndFinalizeWithAllGather,
-    PrepareAndFinalizeWithMC2, QuantType)
+    PrepareAndFinalize, PrepareAndFinalizeWithAll2All,
+    PrepareAndFinalizeWithAllGather, PrepareAndFinalizeWithMC2, QuantType)
 from vllm_ascend.ops.fused_moe.token_dispatcher import (
-    TokenDispatcherWithAll2AllV, TokenDispatcherWithAllGather,
-    TokenDispatcherWithMC2)
+    MoETokenDispatcher, TokenDispatcherWithAll2AllV,
+    TokenDispatcherWithAllGather, TokenDispatcherWithMC2)
 
 from vllm_ascend.quantization.quant_parser import parse_a5_quant_params
 
@@ -47,6 +48,19 @@ def setup_moe_comm_method(moe_config):
     _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
     _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
     _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+
+
+@dataclass
+class FusedExpertsResult:
+    routed_out: torch.Tensor
+    # This field is for shared experts and should be set by the MoE
+    # communication method that supports shared experts in parallel with routed
+    # experts.
+    before_dispatch_evt: torch.npu.Event | None = None
+    before_combine_evt: torch.npu.Event | None = None
+    # For dynamic_eplb
+    group_list_type: int | None = None
+    expert_tokens: torch.Tensor | None = None
 
 
 class MoECommMethod(ABC):
@@ -93,7 +107,6 @@ class MoECommMethod(ABC):
             use_int8_w8a8: bool = False,
             use_int4_w4a8: bool = False,
             use_int4_w4a16: bool = False,
-            global_num_experts: Optional[int] = None,
             expert_map: Optional[torch.Tensor] = None,
             w1_scale: Optional[list[torch.Tensor]] = None,
             w2_scale: Optional[list[torch.Tensor]] = None,
@@ -101,13 +114,8 @@ class MoECommMethod(ABC):
             w2_scale_bias: torch.Tensor = None,
             w1_offset: Optional[torch.Tensor] = None,
             w2_offset: Optional[torch.Tensor] = None,
-            # For Cube/Vector parallel
-            shared_experts: Optional[Any] = None,
-            quantized_x_for_share: Optional[Any] = None,
-            dynamic_scale_for_share: Optional[Any] = None,
             # For load balance
             log2phy: torch.Tensor = None,
-            global_redundant_expert_num: int = 0,
             need_trans: bool = False,
             dynamic_eplb: bool = False,
             mc2_mask: torch.Tensor = None,
@@ -120,93 +128,63 @@ class MoECommMethod(ABC):
 
         moe_comm_method = get_forward_context().moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
-        moe_comm_method = get_forward_context().moe_comm_method
-        use_A5_quant = kwargs.get("use_A5_quant", False)
-        use_fp8_comm = kwargs.get("use_fp8_comm", False)
-        # FIXME(linfeng): currently MC2 op with fp8 communication enconters accuracy issue,
-        # so we force disable it here.
-        use_fp8_comm = False
-        act_quant_type, weight_quant_type, \
-            scale_type, per_token_scale_type, round_mode = parse_a5_quant_params(**kwargs)
-        assert moe_comm_method is not None, "Missing communication context"
-        if isinstance(self.token_dispatcher, TokenDispatcherWithMC2) and use_fp8_comm:
-            results = self.token_dispatcher.token_dispatch_with_A5_quant(
-                hidden_states=hidden_states,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                expert_map=expert_map,
-                log2phy=log2phy,
-                global_redundant_expert_num=global_redundant_expert_num,
-                shared_experts=shared_experts,
-                quantized_x_for_share=quantized_x_for_share,
-                dynamic_scale_for_share=dynamic_scale_for_share,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                with_quant=use_fp8_comm,
-                comm_quant_mode=kwargs.get("comm_quant_mode", 2),
-                y_dtype=act_quant_type if use_fp8_comm else None)
-        else:
-            results = self.token_dispatcher.token_dispatch(
-                hidden_states=hidden_states,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                expert_map=expert_map,
-                log2phy=log2phy,
-                global_redundant_expert_num=global_redundant_expert_num,
-                shared_experts=shared_experts,
-                quantized_x_for_share=quantized_x_for_share,
-                dynamic_scale_for_share=dynamic_scale_for_share,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                with_quant=use_int8_w8a8 or use_int4_w4a8,
-                dynamic_eplb=dynamic_eplb,
-                pertoken_scale=pertoken_scale)
 
-        permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type, topk_scales, context_metadata = \
-            results["hidden_states"], results["group_list"], results.get("dynamic_scale"), results["group_list_type"], results.get("topk_scales"), results.get("context_metadata")
+        # Apply log2phy if needed
+        if log2phy is not None:
+            topk_ids = log2phy[topk_ids]
 
-        mlp_output = unified_apply_mlp(hidden_states=permuted_hidden_states,
-                                       w1=w1,
-                                       w1_scale=w1_scale,
-                                       w2=w2,
-                                       w2_scale=w2_scale,
-                                       group_list=expert_tokens,
-                                       dynamic_scale=dynamic_scale,
-                                       group_list_type=group_list_type,
-                                       w1_scale_bias=w1_scale_bias,
-                                       w2_scale_bias=w2_scale_bias,
-                                       w1_offset=w1_offset,
-                                       w2_offset=w2_offset,
-                                       topk_scales=topk_scales,
-                                       with_quant=use_int8_w8a8
-                                       or use_int4_w4a8 or use_int4_w4a16,
-                                       fusion=use_int8_w8a8,
-                                       need_trans=need_trans,
-                                       dynamic_eplb=dynamic_eplb,
-                                       use_A5_quant=use_A5_quant,
-                                       use_fp8_comm=use_fp8_comm,
-                                       act_quant_type=act_quant_type,
-                                       weight_quant_type=weight_quant_type,
-                                       scale_type=scale_type,
-                                       per_token_scale_type=per_token_scale_type,
-                                       round_mode=round_mode,
-                                       use_bf16=(hidden_states.dtype == torch.bfloat16),
-                                       rollback_quant_config=kwargs.get("rollback_quant_config"))
+        before_dispatch_evt = torch.npu.current_stream().record_event()
+        dispatch_results = self.token_dispatcher.token_dispatch(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            global_redundant_expert_num=self.moe_config.
+            global_redundant_expert_num,
+            mc2_mask=mc2_mask,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            with_quant=use_int8_w8a8 or use_int4_w4a8,
+            dynamic_eplb=dynamic_eplb,
+            pertoken_scale=pertoken_scale)
 
+        mlp_output = unified_apply_mlp(
+            hidden_states=dispatch_results.hidden_states,
+            w1=w1,
+            w1_scale=w1_scale,
+            w2=w2,
+            w2_scale=w2_scale,
+            group_list=dispatch_results.group_list,
+            dynamic_scale=dispatch_results.dynamic_scale,
+            group_list_type=dispatch_results.group_list_type,
+            w1_scale_bias=w1_scale_bias,
+            w2_scale_bias=w2_scale_bias,
+            w1_offset=w1_offset,
+            w2_offset=w2_offset,
+            topk_scales=dispatch_results.topk_scales,
+            with_quant=use_int8_w8a8 or use_int4_w4a8 or use_int4_w4a16,
+            fusion=use_int8_w8a8,
+            need_trans=need_trans,
+            dynamic_eplb=dynamic_eplb)
 
-        final_hidden_states = self.token_dispatcher.token_combine(
-            hidden_states=mlp_output, context_metadata=context_metadata)
+        before_combine_evt = torch.npu.current_stream().record_event()
+        combine_results = self.token_dispatcher.token_combine(
+            hidden_states=mlp_output,
+            context_metadata=dispatch_results.context_metadata)
 
-        if dynamic_eplb:
-            return (final_hidden_states, group_list_type, expert_tokens)
-
-        return final_hidden_states
+        return FusedExpertsResult(
+            routed_out=combine_results.routed_out,
+            before_dispatch_evt=before_dispatch_evt,
+            before_combine_evt=before_combine_evt,
+            group_list_type=dispatch_results.group_list_type,
+            expert_tokens=dispatch_results.group_list)
 
     @abstractmethod
-    def _get_token_dispatcher(self):
+    def _get_token_dispatcher(self) -> MoETokenDispatcher:
         raise NotImplementedError(
             "_get_token_dispatcher function not implemented.")
 
     @abstractmethod
-    def _get_prepare_finalize(self):
+    def _get_prepare_finalize(self) -> PrepareAndFinalize:
         raise NotImplementedError(
             "_get_prepare_finalize function not implemented.")
 
@@ -305,7 +283,6 @@ class FusedMC2CommImpl(MoECommMethod):
             use_int8_w8a8: bool = False,
             use_int4_w4a8: bool = False,
             use_int4_w4a16: bool = False,
-            global_num_experts: Optional[int] = None,
             expert_map: Optional[torch.Tensor] = None,
             w1_scale: Optional[list[torch.Tensor]] = None,
             w2_scale: Optional[list[torch.Tensor]] = None,
@@ -313,13 +290,8 @@ class FusedMC2CommImpl(MoECommMethod):
             w2_scale_bias: torch.Tensor = None,
             w1_offset: Optional[torch.Tensor] = None,
             w2_offset: Optional[torch.Tensor] = None,
-            # For Cube/Vector parallel
-            shared_experts: Optional[Any] = None,
-            quantized_x_for_share: Optional[Any] = None,
-            dynamic_scale_for_share: Optional[Any] = None,
             # For load balance
             log2phy: torch.Tensor = None,
-            global_redundant_expert_num: int = 0,
             need_trans: bool = False,
             dynamic_eplb: bool = False,
             mc2_mask: torch.Tensor = None,
@@ -328,15 +300,24 @@ class FusedMC2CommImpl(MoECommMethod):
             w1_scale is None or w2_scale is None
         ), "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
 
+        assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), \
+            "token_dispatcher must be an instance of TokenDispatcherWithMC2."
+
+        # Apply log2phy if needed
+        if log2phy is not None:
+            topk_ids = log2phy[topk_ids]
+
+        group_list_type = None
+        expert_tokens = None
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
             out = torch.empty_like(hidden_states)
-            torch.ops._C_ascend.dispatch_ffn_combine(
+            torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                 x=hidden_states,
-                weight1=w1[0],
-                weight2=w2[0],
+                weight1=w1,
+                weight2=w2,
                 expert_idx=topk_ids,
-                scale1=w1_scale[0],
-                scale2=w2_scale[0],
+                scale1=w1_scale,
+                scale2=w2_scale,
                 probs=topk_weights.to(torch.float32),
                 group=self.token_dispatcher.moe_all_to_all_group_name,
                 max_output_size=65536,
@@ -344,21 +325,24 @@ class FusedMC2CommImpl(MoECommMethod):
             )
         elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
             assert expert_map is not None, "expert_map cannot be None."
-            out, _ = torch.ops._C_ascend.dispatch_gmm_combine_decode(
+            group_list_type = 1
+            out, expert_tokens = torch.ops._C_ascend.dispatch_gmm_combine_decode(  # type: ignore
                 x=hidden_states,
                 expert_ids=topk_ids,
-                gmm1_permuted_weight=w1[0],
-                gmm1_permuted_weight_scale=w1_scale[0],
-                gmm2_weight=w2[0],
-                gmm2_weight_scale=w2_scale[0],
+                gmm1_permuted_weight=w1,
+                gmm1_permuted_weight_scale=w1_scale,
+                gmm2_weight=w2,
+                gmm2_weight_scale=w2_scale,
                 expert_smooth_scales=None,
                 expert_scales=topk_weights.to(torch.float32),
                 group_ep=self.token_dispatcher.moe_all_to_all_group_name,
                 ep_rank_size=self.token_dispatcher.ep_world_size,
                 ep_rank_id=self.token_dispatcher.ep_rank_id,
-                moe_expert_num=len(expert_map),
-                global_bs=self.token_dispatcher.fused_global_bs)
+                moe_expert_num=self.moe_config.num_experts,
+                global_bs=self.token_dispatcher.global_bs)
         else:
             raise ValueError(
                 f"Wrong value of {envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2=}")
-        return out
+        return FusedExpertsResult(routed_out=out,
+                                  group_list_type=group_list_type,
+                                  expert_tokens=expert_tokens)

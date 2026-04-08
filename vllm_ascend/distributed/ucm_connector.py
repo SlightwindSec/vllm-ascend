@@ -40,6 +40,23 @@ class UCMConnectorV1(KVConnectorBase_V1):
     # ==============================
     # Worker-side methods
     # ==============================
+    def has_connector_metadata(self) -> bool:
+        """Check whether the connector metadata is currently set.
+
+        Returns:
+            bool: True if connector metadata exists, False otherwise.
+        """
+        return self._ucm_engine.has_connector_metadata()
+
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+        """
+        Initialize with the KV caches. Useful for pre-registering the
+        KV Caches in the KVConnector (e.g. for NIXL).
+        Args:
+            kv_caches: A dictionary mapping layer names to KV cache tensors.
+        """
+        self._ucm_engine.register_kv_caches(kv_caches)
+
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs: Any) -> None:
         """

@@ -11,10 +11,11 @@ This document describes how to install vllm-ascend manually.
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | == 8.3.RC2                       | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.8.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.8.0                          | Required for torch-npu and vllm           |
+    | Ascend HDK    | Refer to [here](https://www.hiascend.com/document/detail/zh/canncommercial/850/releasenote/releasenote_0000.html) 25.5 is recommended | Required for CANN |
+    | CANN          | == 8.5.0  | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.8.0  | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.8.0  | Required for torch-npu and vllm           |
+    | NNAL          | == 8.5.0  | Required for libatb.so, enables advanced tensor operations |
 
 There are two installation methods:
 - **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.
@@ -45,6 +46,10 @@ Refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/
 
 The easiest way to prepare your software environment is using CANN image directly:
 
+```{note}
+The CANN prebuilt image includes NNAL (Ascend Neural Network Acceleration Library) which provides libatb.so for advanced tensor operations. No additional installation is required when using the prebuilt image.
+```
+
 ```{code-block} bash
    :substitutions:
 # Update DEVICE according to your device (/dev/davinci[0-7])
@@ -70,6 +75,10 @@ docker run --rm \
 :::{dropdown} Click here to see "Install CANN manually"
 :animate: fade-in-slide-down
 You can also install CANN manually:
+
+```{warning}
+If you encounter "libatb.so not found" errors during runtime, please ensure NNAL is properly installed as shown in the manual installation steps below.
+```
 
 ```bash
 # Create a virtual environment.
@@ -126,8 +135,8 @@ pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/si
 **[Optional]** Then configure the extra-index of `pip` if you are working on an x86 machine or using torch-npu dev version:
 
 ```bash
-# For torch-npu dev version or x86 machine
-pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
+# For x86 machine
+pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"
 ```
 
 Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
