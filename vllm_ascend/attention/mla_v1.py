@@ -1107,6 +1107,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     num_key_value_heads=self.num_heads,
                     input_layout="TND",
                     softmax_scale=self.scale,
+                    sparse_mode=3,
                     return_softmax_lse=True)
         else:
             torch_npu.atb.npu_ring_mla(q_nope=q_nope,
