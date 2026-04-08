@@ -197,11 +197,6 @@ class AscendFusedMoE(FusedMoE):
         self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
         if self.multistream_overlap_gate and AscendFusedMoE.gate_stream is None:
             AscendFusedMoE.gate_stream = torch.npu.Stream()
-        if self.custom_routing_function is None and self.e_score_correction_bias is not None:
-            vllm_config = get_current_vllm_config()
-            self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
-                dtype=vllm_config.model_config.dtype)
-
         # init moe
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.n_shared_experts = num_shared_experts
