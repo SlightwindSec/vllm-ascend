@@ -359,6 +359,7 @@ class AscendW4A8DynamicFusedMoEMethod:
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
+            routed_scaling_factor=routed_scaling_factor,
             global_num_experts=global_num_experts)
 
         # this is a naive implementation for experts load balance so as

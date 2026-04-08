@@ -218,6 +218,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 custom_routing_function=custom_routing_function,
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
+                routed_scaling_factor=routed_scaling_factor,
                 mix_placement=layer.mix_placement,
                 num_logical_experts=router_logits.shape[1],
                 num_shared_experts=n_shared_experts,
