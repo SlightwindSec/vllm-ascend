@@ -130,7 +130,7 @@ class AscendDeepseekV2MoE(DeepseekV2MoE, nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        router_logits, _ = self.gate(hidden_states)
+        router_logits, _ = self.gate(hidden_states.float())
         fused_moe_out = self.experts(hidden_states=hidden_states,
                                      router_logits=router_logits)
         shared_output, final_hidden_states = fused_moe_out
