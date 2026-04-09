@@ -19,6 +19,7 @@ from typing import Callable, Optional
 import torch
 import torch_npu
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.utils import get_weight_prefetch_method
 
 
@@ -61,13 +62,15 @@ def select_experts(hidden_states: torch.Tensor,
     if weight_prefetch_method:
         weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(
             hidden_states, "gate_up")
-    is_support_npu_moe_gating_top_k = check_npu_moe_gating_top_k(
-        hidden_states=hidden_states,
-        top_k=top_k,
-        topk_group=topk_group,
-        num_expert_group=num_expert_group,
-        scoring_func=scoring_func,
-        custom_routing_function=custom_routing_function)
+    is_support_npu_moe_gating_top_k = (
+        envs_ascend.VLLM_USE_FUSED_MOE_GROUPED_TOPK
+        and check_npu_moe_gating_top_k(
+            hidden_states=hidden_states,
+            top_k=top_k,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            scoring_func=scoring_func,
+            custom_routing_function=custom_routing_function))
 
     if is_support_npu_moe_gating_top_k:
         topk_weights, topk_ids = _select_experts_with_fusion_ops(

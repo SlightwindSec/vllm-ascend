@@ -137,6 +137,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to anbale balance scheduling
     "VLLM_ASCEND_BALANCE_SCHEDULING":
     lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", '0'))),
+    # Whether to use fused moe_gating_top_k operator for expert selection.
+    # 0: use native small-op implementation.
+    # 1 (default): use fused NPU operator when supported.
+    "VLLM_USE_FUSED_MOE_GROUPED_TOPK":
+    lambda: bool(int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", '1'))),
 }
 
 # end-env-vars-definition
