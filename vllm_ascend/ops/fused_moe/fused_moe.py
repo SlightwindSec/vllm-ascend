@@ -109,6 +109,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
               apply_router_weight_on_input: bool = False,
               enable_force_load_balance: bool = False,
               **kwargs) -> torch.Tensor:
+        # Upstream FusedMoE.forward_impl only passes layer/x/router_logits,
+        # so fall back to reading from layer when not explicitly provided.
+        routed_scaling_factor = getattr(
+            layer, "routed_scaling_factor", routed_scaling_factor)
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
         topk_weights, topk_ids = select_experts(

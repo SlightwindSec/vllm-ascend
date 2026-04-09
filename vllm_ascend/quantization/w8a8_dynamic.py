@@ -193,6 +193,8 @@ class AscendW8A8DynamicFusedMoEMethod:
         pertoken_scale: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
+        routed_scaling_factor = getattr(
+            layer, "routed_scaling_factor", routed_scaling_factor)
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
         n_shared_experts = layer.n_shared_experts
