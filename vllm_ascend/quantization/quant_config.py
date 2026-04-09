@@ -527,6 +527,8 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         global_redundant_expert_num=0,
         **kwargs,
     ) -> torch.Tensor:
+        routed_scaling_factor = getattr(
+            layer, "routed_scaling_factor", routed_scaling_factor)
         return self.quant_method.apply(
             layer, x, router_logits, top_k, renormalize, use_grouped_topk,
             global_num_experts, expert_map, topk_group, num_expert_group,

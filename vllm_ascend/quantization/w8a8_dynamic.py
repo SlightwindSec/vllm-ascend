@@ -195,6 +195,8 @@ class AscendW8A8DynamicFusedMoEMethod:
         pertoken_scale: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
+        routed_scaling_factor = getattr(
+            layer, "routed_scaling_factor", routed_scaling_factor)
         assert router_logits.shape[
             1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
 

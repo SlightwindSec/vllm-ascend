@@ -91,6 +91,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
               enable_force_load_balance: bool = False,
               shared_experts: Optional[Any] = None,
               **kwargs) -> torch.Tensor:
+        routed_scaling_factor = getattr(
+            layer, "routed_scaling_factor", routed_scaling_factor)
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
