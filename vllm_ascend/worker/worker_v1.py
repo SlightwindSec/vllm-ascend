@@ -30,7 +30,12 @@ from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import (
+    Handle,
+    get_pp_group,
+    get_tp_group,
+)
+from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
@@ -150,6 +155,9 @@ class NPUWorker(WorkerBase):
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
+        # pending non-blocking PP send work from the previous iteration
+        self._pp_send_work: list[Handle] = []
+
     def sleep(self, level: int = 1) -> None:
         if not sleep_mode_enabled():
             raise ValueError(
@@ -266,12 +274,26 @@ class NPUWorker(WorkerBase):
         if envs_ascend.MSMONITOR_USE_DAEMON:
             dp.step()
 
+        # ensure any previous non-blocking PP sends are complete
+        if self._pp_send_work:
+            for handle in self._pp_send_work:
+                handle.wait()
+            self._pp_send_work = []
+
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
-            intermediate_tensors = IntermediateTensors(
-                get_pp_group().recv_tensor_dict(
-                    all_gather_group=get_tp_group()))
+            tensor_dict, comm_handles, comm_postprocess = (
+                get_pp_group().irecv_tensor_dict(
+                    all_gather_group=get_tp_group(),
+                )
+            )
+            assert tensor_dict is not None
+            intermediate_tensors = AsyncIntermediateTensors(
+                tensor_dict,
+                comm_handles=comm_handles,
+                comm_postprocess=comm_postprocess,
+            )
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
@@ -283,8 +305,18 @@ class NPUWorker(WorkerBase):
         assert parallel_config.distributed_executor_backend != (
             "external_launcher") and not get_pp_group().is_last_rank
 
-        get_pp_group().send_tensor_dict(output.tensors,
-                                        all_gather_group=get_tp_group())
+        # launch non-blocking send of intermediate tensors
+        self._pp_send_work = get_pp_group().isend_tensor_dict(
+            output.tensors,
+            all_gather_group=get_tp_group(),
+        )
+
+        # PP + async scheduling: receive sampled token ids from last rank
+        # so the non-last rank can build correct input_ids for next iteration.
+        if (self.model_runner.use_async_scheduling
+                and get_pp_group().world_size > 1):
+            self.model_runner \
+                ._pp_receive_prev_sampled_token_ids_to_input_batch()
 
         kv_connector_output = output.kv_connector_output
         if not kv_connector_output:
