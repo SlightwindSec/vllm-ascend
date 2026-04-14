@@ -55,12 +55,19 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     world_size = torch.distributed.get_world_size()
     backend = torch.distributed.get_backend(get_world_group().device_group)
 
-    # The layout of all ranks: ExternalDP * EP
+    global_tp_size = parallel_config.tensor_parallel_size
+    global_dp_size = parallel_config.data_parallel_size
+    global_pp_size = parallel_config.pipeline_parallel_size
+
+    # The layout of all ranks: ExternalDP * (DP, PP, TP)
     # ExternalDP is the data parallel group that is not part of the model,
     # every dp rank can generate independently (in verl integration).
     all_ranks = torch.arange(world_size).reshape(
-        -1, parallel_config.data_parallel_size *
-        parallel_config.tensor_parallel_size)
+        -1,
+        global_dp_size,
+        global_pp_size,
+        global_tp_size,
+    )
 
     pd_tp_ratio = get_ascend_config().pd_tp_ratio
     pd_head_ratio = get_ascend_config().pd_head_ratio
@@ -74,21 +81,21 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
         num_head_replica = get_ascend_config().num_head_replica
         remote_tp_size = parallel_config.tensor_parallel_size // pd_tp_ratio
         if num_head_replica <= 1:
-            group_ranks = all_ranks.view(
+            group_ranks = all_ranks.reshape(
                 -1, prefill_tensor_model_parallel_size).unbind(0)
         else:
-            group_ranks = all_ranks.clone().view(
-                parallel_config.data_parallel_size, -1,
-                num_head_replica)  # [DP_size, num_head, num_head_replica]
+            group_ranks = all_ranks.clone().reshape(
+                global_dp_size * global_pp_size, -1,
+                num_head_replica)  # [DP*PP, num_head, num_head_replica]
             group_ranks = group_ranks.permute(0, 2, 1)
             group_ranks = group_ranks.reshape(
                 -1,
-                group_ranks.size(-1))  # [DP_size * num_head_replica, num_head]
+                group_ranks.size(-1))  # [DP*PP * num_head_replica, num_head]
             alltoall_group_size = group_ranks.size(-1) // remote_tp_size
             group_ranks = group_ranks.unsqueeze(-1).view(
-                parallel_config.data_parallel_size, num_head_replica, -1,
+                global_dp_size * global_pp_size, num_head_replica, -1,
                 alltoall_group_size
-            )  # [DP_size, num_head_replica, num_alltoall_group, alltoall_group_size]
+            )  # [DP*PP, num_head_replica, num_alltoall_group, alltoall_group_size]
             group_ranks = group_ranks.reshape(-1,
                                               alltoall_group_size).unbind(0)
         group_ranks = [x.tolist() for x in group_ranks]
@@ -101,11 +108,17 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                           backend,
                                           group_name=f"p_tp_{num}")
 
-    global _MC2
-    group_ranks = all_ranks.unbind(0)
-    group_ranks = [x.tolist() for x in group_ranks]
+    # EP-like group ranks: transpose PP dimension so that ranks within
+    # the same PP stage are grouped together for MC2 communication.
+    ep_like_ranks = (
+        all_ranks.transpose(1, 2)
+        .reshape(-1, global_dp_size * global_tp_size)
+        .unbind(0)
+    )
+    ep_like_group_ranks = [x.tolist() for x in ep_like_ranks]
 
-    _MC2 = init_model_parallel_group(group_ranks,
+    global _MC2
+    _MC2 = init_model_parallel_group(ep_like_group_ranks,
                                      get_world_group().local_rank,
                                      backend,
                                      group_name="mc2")

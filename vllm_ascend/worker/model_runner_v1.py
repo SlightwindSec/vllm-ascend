@@ -2529,14 +2529,29 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
             else:
+                # When PP and SP (flashcomm1) are enabled, intermediate
+                # tensors should be divided by tp_size; otherwise non-first
+                # PP ranks would effectively perform an extra all-gather,
+                # leading to incorrect memory estimation and potential OOM.
+                intermediate_tokens = num_tokens
+                if enable_sp():
+                    from vllm.distributed import \
+                        get_tensor_model_parallel_world_size
+                    tp_size = get_tensor_model_parallel_world_size()
+                    intermediate_tokens = (
+                        num_tokens + tp_size - 1) // tp_size
                 if self.intermediate_tensors is None:
+                    max_tokens = self.max_num_tokens
+                    if enable_sp():
+                        max_tokens = (
+                            self.max_num_tokens + tp_size - 1) // tp_size
                     self.intermediate_tensors = (
                         self.model.make_empty_intermediate_tensors(
-                            batch_size=num_tokens,
+                            batch_size=max_tokens,
                             dtype=self.dtype,
                             device=self.device))
                 intermediate_tensors = IntermediateTensors({
-                    k: v[:num_tokens]
+                    k: v[:intermediate_tokens]
                     for k, v in self.intermediate_tensors.items()
                 })
 
