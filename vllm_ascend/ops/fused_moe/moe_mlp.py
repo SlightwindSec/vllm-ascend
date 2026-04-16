@@ -144,10 +144,11 @@ def quant_apply_mlp_A5(hidden_states: torch.Tensor,
         x_scale_dtype=torch_npu.float8_e8m0fnu
     )
 
-    # Zero GMM1 tail: FP8 hidden_states and swiglu_out_scale
+    # Zero GMM1 tail: FP8 hidden_states and swiglu_out_scale.
+    # NPU fill_ does not support FP8 dtypes, so view as uint8 to zero.
     if active_tokens < hidden_states.shape[0]:
-        hidden_states[active_tokens:] = 0
-        swiglu_out_scale[active_tokens:] = 0
+        hidden_states[active_tokens:].view(torch.uint8).zero_()
+        swiglu_out_scale[active_tokens:].view(torch.uint8).zero_()
 
     if _dbg:
         print(f"[R{_rank}] GMM1: hs={list(hidden_states.shape)} pscale={list(pertoken_scale.shape)} "
