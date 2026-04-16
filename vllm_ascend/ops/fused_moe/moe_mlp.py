@@ -95,6 +95,19 @@ def quant_apply_mlp_A5(hidden_states: torch.Tensor,
     output_dtype = hidden_states.dtype if hidden_states.dtype in [torch.bfloat16, torch.float16] \
         else (torch.bfloat16 if kwargs.get("use_bf16", True) else torch.float16)
 
+    import os
+    if os.environ.get("DEBUG_MXFP8", "0") == "1":
+        import torch.distributed as dist
+        rank = dist.get_rank() if dist.is_initialized() else -1
+        print(f"[RANK {rank}] quant_apply_mlp_A5: "
+              f"hidden_states={hidden_states.shape} dtype={hidden_states.dtype}, "
+              f"w1={w1.shape}, w2={w2.shape}, "
+              f"w1_scale={w1_scale.shape}, w2_scale={w2_scale.shape}, "
+              f"group_list={group_list.shape} values={group_list.tolist()}, "
+              f"group_list_type={group_list_type}, "
+              f"dynamic_scale={'None' if dynamic_scale is None else dynamic_scale.shape}",
+              flush=True)
+
     if dynamic_scale is None:
         unquantized_hidden_states = hidden_states
         hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
