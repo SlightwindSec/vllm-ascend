@@ -95,6 +95,16 @@ def quant_apply_mlp_A5(hidden_states: torch.Tensor,
     output_dtype = hidden_states.dtype if hidden_states.dtype in [torch.bfloat16, torch.float16] \
         else (torch.bfloat16 if kwargs.get("use_bf16", True) else torch.float16)
 
+    import os
+    _dbg = os.environ.get("DEBUG_MXFP8", "0") == "1" and hidden_states.shape[0] <= 8192
+    if _dbg:
+        import torch.distributed as dist
+        _rank = dist.get_rank() if dist.is_initialized() else -1
+        _gl_sum = int(group_list.sum())
+        print(f"[R{_rank}] A5_IN: hs={list(hidden_states.shape)} gl_sum={_gl_sum}/{group_list.shape[0]} "
+              f"w1={list(w1.shape)} dyn_scale={'N' if dynamic_scale is None else list(dynamic_scale.shape)}",
+              flush=True)
+
     if dynamic_scale is None:
         unquantized_hidden_states = hidden_states
         hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
@@ -128,6 +138,15 @@ def quant_apply_mlp_A5(hidden_states: torch.Tensor,
         x_scale_dtype=torch_npu.float8_e8m0fnu
     )
 
+    if _dbg:
+        _gl_sum = int(group_list.sum())
+        print(f"[R{_rank}] GMM1: hs={list(hidden_states.shape)} pscale={list(pertoken_scale.shape)} "
+              f"sscale={list(swiglu_out_scale.shape)} "
+              + (f"nv={float(hidden_states[:_gl_sum].float().norm()):.2f} nt={float(hidden_states[_gl_sum:].float().norm()):.2f}"
+                 if _gl_sum < hidden_states.shape[0]
+                 else f"nall={float(hidden_states.float().norm()):.2f}"),
+              flush=True)
+
     hidden_states = torch_npu.npu_grouped_matmul(x=[hidden_states],
                                                  weight=[w2],
                                                  scale=[w2_scale],
@@ -149,6 +168,13 @@ def quant_apply_mlp_A5(hidden_states: torch.Tensor,
     active_tokens = int(group_list.sum())
     if active_tokens < hidden_states.shape[0]:
         hidden_states[active_tokens:] = 0
+
+    if _dbg:
+        _nv = float(hidden_states[:active_tokens].float().norm()) if active_tokens > 0 else 0.0
+        _nt = float(hidden_states[active_tokens:].float().norm()) if active_tokens < hidden_states.shape[0] else 0.0
+        print(f"[R{_rank}] GMM2: hs={list(hidden_states.shape)} "
+              f"nv={_nv:.2f} nt={_nt:.2f} nan={bool(hidden_states.isnan().any())} inf={bool(hidden_states.isinf().any())}",
+              flush=True)
 
     return hidden_states
     
