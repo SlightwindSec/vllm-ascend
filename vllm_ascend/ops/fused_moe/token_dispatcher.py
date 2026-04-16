@@ -541,6 +541,8 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
                 if self.with_quant and pertoken_scale is None else -1,
             ))
         expert_tokens = expert_tokens.to(torch.int64)
+        if expert_map is not None:
+            expert_tokens = expert_tokens[first_expert_idx:last_expert_idx]
         group_list_type = 1  # `count` mode
         context_metadata = {
             "topk_weights": topk_weights,
