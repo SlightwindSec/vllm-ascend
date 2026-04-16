@@ -95,13 +95,19 @@ def quant_apply_mlp_A5(hidden_states: torch.Tensor,
     output_dtype = hidden_states.dtype if hidden_states.dtype in [torch.bfloat16, torch.float16] \
         else (torch.bfloat16 if kwargs.get("use_bf16", True) else torch.float16)
 
+    # In EP mode, hidden_states has more rows than local expert tokens.
+    # Zero tail rows BEFORE quantization so NaN/garbage never enters the pipeline.
+    active_tokens = int(group_list.sum())
+    if active_tokens < hidden_states.shape[0]:
+        hidden_states = hidden_states.clone()
+        hidden_states[active_tokens:] = 0
+
     import os
     _dbg = os.environ.get("DEBUG_MXFP8", "0") == "1" and hidden_states.shape[0] <= 8192
     if _dbg:
         import torch.distributed as dist
         _rank = dist.get_rank() if dist.is_initialized() else -1
-        _gl_sum = int(group_list.sum())
-        print(f"[R{_rank}] A5_IN: hs={list(hidden_states.shape)} gl_sum={_gl_sum}/{group_list.shape[0]} "
+        print(f"[R{_rank}] A5_IN: hs={list(hidden_states.shape)} act={active_tokens}/{group_list.shape[0]} "
               f"w1={list(w1.shape)} dyn_scale={'N' if dynamic_scale is None else list(dynamic_scale.shape)}",
               flush=True)
 
@@ -138,12 +144,16 @@ def quant_apply_mlp_A5(hidden_states: torch.Tensor,
         x_scale_dtype=torch_npu.float8_e8m0fnu
     )
 
+    # Zero GMM1 tail: FP8 hidden_states and swiglu_out_scale
+    if active_tokens < hidden_states.shape[0]:
+        hidden_states[active_tokens:] = 0
+        swiglu_out_scale[active_tokens:] = 0
+
     if _dbg:
-        _gl_sum = int(group_list.sum())
         print(f"[R{_rank}] GMM1: hs={list(hidden_states.shape)} pscale={list(pertoken_scale.shape)} "
               f"sscale={list(swiglu_out_scale.shape)} "
-              + (f"nv={float(hidden_states[:_gl_sum].float().norm()):.2f} nt={float(hidden_states[_gl_sum:].float().norm()):.2f}"
-                 if _gl_sum < hidden_states.shape[0]
+              + (f"nv={float(hidden_states[:active_tokens].float().norm()):.2f} nt={float(hidden_states[active_tokens:].float().norm()):.2f}"
+                 if active_tokens < hidden_states.shape[0]
                  else f"nall={float(hidden_states.float().norm()):.2f}"),
               flush=True)
 
