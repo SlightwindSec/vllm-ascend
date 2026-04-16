@@ -305,12 +305,30 @@ class AscendFusedMoE(FusedMoE):
                 set_flash_common3_context(topk_weights=topk_weights,
                                           topk_ids=topk_ids)
 
+        import os
+        _dbg_moe = os.environ.get("DEBUG_MXFP8", "0") == "1" and hidden_states.shape[0] <= 8192
+        if _dbg_moe:
+            import torch.distributed as dist
+            _rank = dist.get_rank() if dist.is_initialized() else -1
+            print(f"[R{_rank}] MOE_PRE: hs={list(hidden_states.shape)} "
+                  f"norm={float(hidden_states.float().norm()):.2f} "
+                  f"rl={list(router_logits.shape)} sp={forward_context.sp_enabled} "
+                  f"qt={self.quant_type}",
+                  flush=True)
+
         hidden_states, router_logits, mc2_mask, context_metadata = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             replace_allreduce=forward_context.sp_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp,
             quant_type=self.quant_type)
+
+        if _dbg_moe:
+            _hs = hidden_states[0] if isinstance(hidden_states, tuple) else hidden_states
+            print(f"[R{_rank}] MOE_POST_PREPARE: hs={list(_hs.shape)} "
+                  f"norm={float(_hs.float().norm()):.2f} "
+                  f"is_tuple={isinstance(hidden_states, tuple)}",
+                  flush=True)
 
         # Make sure the default stream waits for the gate stream to finish.
         if self.multistream_overlap_gate:
@@ -347,6 +365,13 @@ class AscendFusedMoE(FusedMoE):
             global_redundant_expert_num=self.global_redundant_expert_num,
             mc2_mask=mc2_mask)
 
+        if _dbg_moe:
+            _fhs = final_hidden_states[0] if isinstance(final_hidden_states, tuple) else final_hidden_states
+            print(f"[R{_rank}] MOE_POST_APPLY: hs={list(_fhs.shape)} "
+                  f"norm={float(_fhs.float().norm()):.2f} "
+                  f"nan={bool(_fhs.isnan().any())} inf={bool(_fhs.isinf().any())}",
+                  flush=True)
+
         if isinstance(final_hidden_states, tuple):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
             if self.dynamic_eplb:
@@ -364,6 +389,12 @@ class AscendFusedMoE(FusedMoE):
             hidden_states=final_hidden_states,
             reduce_results=self.reduce_results,
             context_metadata=context_metadata)
+
+        if _dbg_moe:
+            print(f"[R{_rank}] MOE_POST_FINAL: hs={list(final_hidden_states.shape)} "
+                  f"norm={float(final_hidden_states.float().norm()):.2f} "
+                  f"nan={bool(final_hidden_states.isnan().any())} inf={bool(final_hidden_states.isinf().any())}",
+                  flush=True)
 
         return final_hidden_states
 
