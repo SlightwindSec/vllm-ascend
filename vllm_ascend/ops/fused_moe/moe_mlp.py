@@ -95,16 +95,6 @@ def quant_apply_mlp_A5(hidden_states: torch.Tensor,
     output_dtype = hidden_states.dtype if hidden_states.dtype in [torch.bfloat16, torch.float16] \
         else (torch.bfloat16 if kwargs.get("use_bf16", True) else torch.float16)
 
-    import os
-    _dbg = os.environ.get("DEBUG_MXFP8", "0") == "1" and hidden_states.shape[0] <= 8192
-    if _dbg:
-        import torch.distributed as dist
-        _rank = dist.get_rank() if dist.is_initialized() else -1
-        _gl_sum = int(group_list.sum())
-        print(f"[R{_rank}] A5_IN: hs={list(hidden_states.shape)} gl_sum={_gl_sum}/{group_list.shape[0]} "
-              f"w1={list(w1.shape)} dyn_scale={'N' if dynamic_scale is None else list(dynamic_scale.shape)}",
-              flush=True)
-
     if dynamic_scale is None:
         unquantized_hidden_states = hidden_states
         hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
@@ -138,16 +128,6 @@ def quant_apply_mlp_A5(hidden_states: torch.Tensor,
         x_scale_dtype=torch_npu.float8_e8m0fnu
     )
 
-    if _dbg:
-        _gl_sum = int(group_list.sum())
-        print(f"[R{_rank}] GMM1_OUT: hs={list(hidden_states.shape)} scale={list(pertoken_scale.shape)} "
-              f"swiglu_scale={list(swiglu_out_scale.shape)} "
-              f"valid={_gl_sum} norm_valid={float(hidden_states[:_gl_sum].float().norm()):.4f} "
-              f"norm_tail={float(hidden_states[_gl_sum:].float().norm()):.4f}" if _gl_sum < hidden_states.shape[0]
-              else f"[R{_rank}] GMM1_OUT: hs={list(hidden_states.shape)} scale={list(pertoken_scale.shape)} "
-              f"swiglu_scale={list(swiglu_out_scale.shape)} norm_all={float(hidden_states.float().norm()):.4f}",
-              flush=True)
-
     hidden_states = torch_npu.npu_grouped_matmul(x=[hidden_states],
                                                  weight=[w2],
                                                  scale=[w2_scale],
@@ -162,15 +142,13 @@ def quant_apply_mlp_A5(hidden_states: torch.Tensor,
                                                  weight_dtype=weight_dtype,
                                                  output_dtype=output_dtype)[0]
 
-    if _dbg:
-        _gl_sum = int(group_list.sum())
-        _nv = float(hidden_states[:_gl_sum].float().norm()) if _gl_sum > 0 else 0.0
-        _nt = float(hidden_states[_gl_sum:].float().norm()) if _gl_sum < hidden_states.shape[0] else 0.0
-        _has_nan = bool(hidden_states[:_gl_sum].isnan().any()) if _gl_sum > 0 else False
-        _has_inf = bool(hidden_states[:_gl_sum].isinf().any()) if _gl_sum > 0 else False
-        print(f"[R{_rank}] GMM2_OUT: hs={list(hidden_states.shape)} "
-              f"norm_valid={_nv:.4f} norm_tail={_nt:.4f} nan={_has_nan} inf={_has_inf}",
-              flush=True)
+    # In EP mode, npu_moe_init_routing_v2 returns active_num rows but only
+    # sum(group_list) rows are for local experts. The grouped matmul only
+    # computes valid rows; tail rows contain garbage (NaN from FP8 stage).
+    # Zero them out to prevent contamination during token_combine/reduce.
+    active_tokens = int(group_list.sum())
+    if active_tokens < hidden_states.shape[0]:
+        hidden_states[active_tokens:] = 0
 
     return hidden_states
     
