@@ -260,6 +260,8 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        routed_scaling_factor = getattr(
+            layer, "routed_scaling_factor", routed_scaling_factor)
         return self.quant_method.apply(
             layer=layer,
             x=x,

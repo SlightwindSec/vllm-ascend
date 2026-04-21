@@ -187,6 +187,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        routed_scaling_factor = getattr(
+            layer, "routed_scaling_factor", routed_scaling_factor)
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
         if zero_expert_num == 0 or zero_expert_type is None:

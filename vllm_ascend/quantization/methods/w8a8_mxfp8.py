@@ -176,6 +176,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        routed_scaling_factor = getattr(
+            layer, "routed_scaling_factor", routed_scaling_factor)
         expected = global_num_experts - global_redundant_expert_num
         assert router_logits.shape[1] == expected, "Number of global experts mismatch (excluding redundancy)"
         topk_weights, topk_ids = select_experts(

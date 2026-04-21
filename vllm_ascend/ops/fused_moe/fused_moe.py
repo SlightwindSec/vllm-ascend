@@ -118,6 +118,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         pertoken_scale: torch.Tensor | None = None,
         mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        routed_scaling_factor = getattr(
+            layer, "routed_scaling_factor", routed_scaling_factor)
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
         topk_weights, topk_ids = select_experts(
@@ -317,11 +319,6 @@ class AscendFusedMoE(FusedMoE):
         self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
         if self.multistream_overlap_gate and AscendFusedMoE.gate_stream is None:
             AscendFusedMoE.gate_stream = torch.npu.Stream()
-        if self.custom_routing_function is None and self.e_score_correction_bias is not None:
-            vllm_config = get_current_vllm_config()
-            self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
-                dtype=vllm_config.model_config.dtype
-            )
 
         # init moe
         eplb_config = ascend_config.eplb_config

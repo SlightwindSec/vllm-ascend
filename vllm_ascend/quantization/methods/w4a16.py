@@ -200,6 +200,8 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        routed_scaling_factor = getattr(
+            layer, "routed_scaling_factor", routed_scaling_factor)
         assert router_logits.shape[1] == global_num_experts - global_redundant_expert_num, (
             "Number of global experts mismatch (excluding redundancy)"
         )
