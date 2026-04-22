@@ -1639,6 +1639,7 @@ class AscendEagleProposer(SpecDecodeBaseProposer):
         device: torch.device,
         runner=None,
     ):
+        self.runner = runner
         super().__init__(
             vllm_config,
             device,
