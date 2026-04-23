@@ -58,6 +58,7 @@ def select_experts(
         topk_weights: router weights of shape (num_tokens, top_k).
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
+    routed_scaling_factor = 2.826
     # prefetch w1_w3_proj.weight preprocess
     weight_prefetch_method = get_weight_prefetch_method()
     weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(hidden_states, "gate_up")
