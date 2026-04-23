@@ -766,6 +766,21 @@ class NPUModelRunner(GPUModelRunner):
         # Fill unused with -1. Needed for reshape_and_cache in attention_cp
         self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
+        # The base class _prepare_input_ids has an async-scheduling fast-path
+        # that scatters self.input_batch.prev_sampled_token_ids into input_ids
+        # using self.prev_positions to map current requests back to their
+        # previous-iteration slot. The NPU _prepare_inputs does not populate
+        # self.prev_positions, so whenever a new request enters the batch the
+        # stale mapping would scatter the previous step's last sampled token
+        # onto the new request's last prompt slot and corrupt its prefill.
+        # Disable the fast-path whenever any request in the current batch was
+        # not present in the previous step.
+        if self.input_batch.prev_sampled_token_ids is not None:
+            prev_map = self.input_batch.prev_req_id_to_index or {}
+            if any(rid not in prev_map for rid in self.input_batch.req_ids[:num_reqs]):
+                self.input_batch.prev_sampled_token_ids = None
+                self.input_batch.prev_req_id_to_index = None
+
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, total_num_scheduled_tokens, cu_num_tokens)
         # Calculate M-RoPE positions.
