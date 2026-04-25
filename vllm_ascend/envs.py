@@ -107,6 +107,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
+    # Trace input_ids / sampled_token_ids on rank-0 to debug async-scheduling
+    # combined with MTP/spec-decode. Default off; set to 1 to enable.
+    "VLLM_ASCEND_DEBUG_ASYNC_MTP": lambda: bool(int(os.getenv("VLLM_ASCEND_DEBUG_ASYNC_MTP", "0"))),
+    # On NPU the async-spec-decode fast-path (input_batch.prev_sampled_token_ids
+    # scattered via prev_positions) is unsafe because prev_positions and
+    # valid_sampled_token_count_gpu are not maintained. Default on: synchronously
+    # parse rejection-sampler output back to CPU so token_ids_cpu carries real
+    # token ids in the next step instead of -1 placeholders.
+    "VLLM_ASCEND_DISABLE_ASYNC_FASTPATH": lambda: bool(int(os.getenv("VLLM_ASCEND_DISABLE_ASYNC_FASTPATH", "1"))),
 }
 
 # end-env-vars-definition
