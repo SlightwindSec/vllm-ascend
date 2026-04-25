@@ -89,7 +89,6 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import AttentionGroup
 
 # yapf: enable
-from vllm_ascend import envs as ascend_envs
 from vllm_ascend._async_mtp_debug import amtp_log
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -789,20 +788,22 @@ class NPUModelRunner(GPUModelRunner):
         # Fill unused with -1. Needed for reshape_and_cache in attention_cp
         self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
-        # The base class _prepare_input_ids has an async-scheduling fast-path
-        # that scatters self.input_batch.prev_sampled_token_ids into input_ids
-        # using self.prev_positions to map current requests back to their
-        # previous-iteration slot. The NPU _prepare_inputs does not populate
-        # self.prev_positions, so whenever a new request enters the batch the
-        # stale mapping would scatter the previous step's last sampled token
-        # onto the new request's last prompt slot and corrupt its prefill.
-        # Disable the fast-path whenever any request in the current batch was
-        # not present in the previous step.
-        if self.input_batch.prev_sampled_token_ids is not None:
-            prev_map = self.input_batch.prev_req_id_to_index or {}
-            if any(rid not in prev_map for rid in self.input_batch.req_ids[:num_reqs]):
-                self.input_batch.prev_sampled_token_ids = None
-                self.input_batch.prev_req_id_to_index = None
+        # The HCF-vLLM-Hetero base class _prepare_input_ids walks
+        # self.prev_positions.np[:num_reqs] (an int64 array, -1 for new reqs)
+        # to map current requests back to their previous-iteration slot, and
+        # scatters input_batch.prev_sampled_token_ids + self._draft_token_ids
+        # into input_ids.gpu's base/spec slots. NPU's _prepare_inputs did not
+        # call _compute_prev_positions so prev_positions was stale, the fast
+        # path scattered onto wrong indices, and worse, when prev_positions
+        # was missing entirely the spec-slot scatter was skipped, leaving the
+        # AsyncScheduler's [-1] * num_spec_tokens placeholders in token_ids_cpu
+        # to flow into the model. Refresh prev_positions here so the base
+        # fast-path scatter is correct on NPU as well. Guarded with hasattr
+        # to keep this file safe to import against an upstream vllm without
+        # the zero-bubble buffers.
+        if hasattr(self, "_compute_prev_positions") and hasattr(self, "prev_positions"):
+            self._compute_prev_positions(num_reqs)
+            self.prev_positions.copy_to_gpu(num_reqs)
 
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, total_num_scheduled_tokens, cu_num_tokens)
@@ -1080,12 +1081,6 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_discarded_requests,
                 )
                 self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
-                if self.num_spec_tokens > 0 and ascend_envs.VLLM_ASCEND_DISABLE_ASYNC_FASTPATH:
-                    # _copy_valid_sampled_token_count writes
-                    # input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
-                    # which would re-arm the unsafe async fast-path on NPU after
-                    # _bookkeeping_sync cleared it. Drop it again here.
-                    self.input_batch.prev_sampled_token_ids = None
 
             req_scheduled_tokens = scheduler_output.num_scheduled_tokens
             if self.use_cp:
@@ -1587,22 +1582,6 @@ class NPUModelRunner(GPUModelRunner):
                 sample_hidden_states,
                 batch_desc,
             )
-            # NPU fix: the base _copy_draft_token_ids_to_cpu skips the async path
-            # when sampling_metadata.output_token_ids is falsy / unset, leaving
-            # _draft_token_req_ids = None. take_draft_token_ids() then returns
-            # None, the scheduler never gets the draft tokens, and the next step
-            # writes -1 placeholders into token_ids_cpu (mtp.log: ids@pos=[base,-1]
-            # while [draft_out] shows propose actually produced a real id).
-            # Materialize draft_token_ids to a CPU list and set req_ids ourselves
-            # so _get_draft_token_ids_cpu's list fast-path is taken.
-            if (
-                ascend_envs.VLLM_ASCEND_DISABLE_ASYNC_FASTPATH
-                and self.use_async_scheduling
-                and isinstance(self._draft_token_ids, torch.Tensor)
-            ):
-                self._draft_token_ids = self._draft_token_ids.tolist()
-                self._draft_token_req_ids = self.input_batch.req_ids.copy()
-
             if self.dp_rank == 0 and get_tp_group().rank_in_group == 0:
                 _dt = self._draft_token_ids
                 if isinstance(_dt, torch.Tensor):
@@ -1611,12 +1590,9 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     _dt_show = _dt[: min(len(_dt) if _dt else 0, 4)] if _dt else _dt
                     _dt_kind = type(_dt).__name__
-                _omt = self.input_batch.sampling_metadata.output_token_ids
-                _omt_kind = f"{type(_omt).__name__}/len={len(_omt) if _omt is not None else 'None'}"
                 amtp_log(
-                    "[draft_out] s=%s kind=%s draft=%s req_ids_set=%s sm.output_tok=%s",
+                    "[draft_out] s=%s kind=%s draft=%s",
                     getattr(self, "_async_mtp_step", "?"), _dt_kind, _dt_show,
-                    self._draft_token_req_ids is not None, _omt_kind,
                 )
             self._copy_draft_token_ids_to_cpu(scheduler_output)
 
@@ -1789,25 +1765,12 @@ class NPUModelRunner(GPUModelRunner):
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
             invalid_req_indices_set = set(invalid_req_indices)
 
-            disable_async_fastpath = (
-                self.num_spec_tokens > 0 and ascend_envs.VLLM_ASCEND_DISABLE_ASYNC_FASTPATH
-            )
             if self.num_spec_tokens <= 0:
                 assert sampled_token_ids.shape[-1] == 1
                 # Cache the sampled tokens on the NPU and avoid CPU sync.
                 # These will be copied into input_ids in the next step
                 # when preparing inputs.
                 self.input_batch.prev_sampled_token_ids = sampled_token_ids
-            elif disable_async_fastpath:
-                # NPU async + spec-decode fallback: sync rejection-sampler output
-                # to CPU so token_ids_cpu carries real ids in the next step.
-                valid_sampled_token_ids, cu_num_tokens = RejectionSampler.parse_output(
-                    sampled_token_ids,
-                    self.input_batch.vocab_size,
-                    discard_sampled_tokens_req_indices,
-                    logprobs_tensors=logprobs_tensors,
-                )
-                self.input_batch.prev_sampled_token_ids = None
 
             self.input_batch.prev_req_id_to_index = {
                 req_id: i for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
@@ -1819,11 +1782,8 @@ class NPUModelRunner(GPUModelRunner):
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
         req_ids = self.input_batch.req_ids
-        async_placeholder = self.use_async_scheduling and not (
-            self.num_spec_tokens > 0 and ascend_envs.VLLM_ASCEND_DISABLE_ASYNC_FASTPATH
-        )
         for req_idx in range(num_sampled_tokens):
-            if async_placeholder:
+            if self.use_async_scheduling:
                 sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
             else:
                 sampled_ids = valid_sampled_token_ids[req_idx]
@@ -1857,9 +1817,8 @@ class NPUModelRunner(GPUModelRunner):
                 for i in range(min(num_sampled_tokens, 4))
             ]
             amtp_log(
-                "[book] s=%s async=%s spec=%d disable_fast=%s prev_st=%s last_tok=%s invalid=%s",
+                "[book] s=%s async=%s spec=%d prev_st=%s last_tok=%s invalid=%s",
                 getattr(self, "_async_mtp_step", "?"), self.use_async_scheduling, self.num_spec_tokens,
-                bool(self.num_spec_tokens > 0 and ascend_envs.VLLM_ASCEND_DISABLE_ASYNC_FASTPATH),
                 (None if _pst is None else tuple(_pst.shape)), _written, invalid_req_indices,
             )
 
