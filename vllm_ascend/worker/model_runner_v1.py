@@ -90,6 +90,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 # yapf: enable
 from vllm_ascend import envs as ascend_envs
+from vllm_ascend._async_mtp_debug import amtp_log
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
@@ -612,15 +613,15 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
-        if ascend_envs.VLLM_ASCEND_DEBUG_ASYNC_MTP and self.dp_rank == 0 and get_tp_group().rank_in_group == 0:
+        if self.dp_rank == 0 and get_tp_group().rank_in_group == 0:
             self._async_mtp_step = getattr(self, "_async_mtp_step", 0) + 1
             _pst = self.input_batch.prev_sampled_token_ids
             _pst_shape = tuple(_pst.shape) if _pst is not None else None
             _pri = self.input_batch.prev_req_id_to_index
             _rids = list(self.input_batch.req_ids[:num_reqs])
             _new = [r for r in _rids if (_pri is None or r not in _pri)]
-            logger.info(
-                "[AMTP][prep] s=%d nreq=%d spec=%d cur=%s prev_idx=%s prev_st=%s new=%s nsched=%s",
+            amtp_log(
+                "[prep] s=%d nreq=%d spec=%d cur=%s prev_idx=%s prev_st=%s new=%s nsched=%s",
                 self._async_mtp_step, num_reqs, self.num_spec_tokens, _rids,
                 (None if _pri is None else [_pri.get(r) for r in _rids]),
                 _pst_shape, _new, num_scheduled_tokens.tolist(),
@@ -1808,14 +1809,14 @@ class NPUModelRunner(GPUModelRunner):
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
-        if ascend_envs.VLLM_ASCEND_DEBUG_ASYNC_MTP and self.dp_rank == 0 and get_tp_group().rank_in_group == 0:
+        if self.dp_rank == 0 and get_tp_group().rank_in_group == 0:
             _pst = self.input_batch.prev_sampled_token_ids
             _written = [
                 (req_ids[i], self.input_batch.token_ids_cpu[i, self.input_batch.num_tokens_no_spec[i] - 1].item())
                 for i in range(min(num_sampled_tokens, 4))
             ]
-            logger.info(
-                "[AMTP][book] s=%s async=%s spec=%d disable_fast=%s prev_st=%s last_tok=%s invalid=%s",
+            amtp_log(
+                "[book] s=%s async=%s spec=%d disable_fast=%s prev_st=%s last_tok=%s invalid=%s",
                 getattr(self, "_async_mtp_step", "?"), self.use_async_scheduling, self.num_spec_tokens,
                 bool(self.num_spec_tokens > 0 and ascend_envs.VLLM_ASCEND_DISABLE_ASYNC_FASTPATH),
                 (None if _pst is None else tuple(_pst.shape)), _written, invalid_req_indices,

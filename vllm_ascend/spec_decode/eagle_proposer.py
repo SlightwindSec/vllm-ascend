@@ -39,7 +39,7 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-from vllm_ascend import envs as ascend_envs
+from vllm_ascend._async_mtp_debug import amtp_log
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -487,13 +487,13 @@ class SpecDecodeBaseProposer(EagleProposer):
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
-        if ascend_envs.VLLM_ASCEND_DEBUG_ASYNC_MTP and get_tp_group().rank_in_group == 0:
+        if get_tp_group().rank_in_group == 0:
             _qsl = common_attn_metadata.query_start_loc[: batch_size + 1].tolist()
             _last = (token_indices_to_sample[: min(batch_size, 4)]).tolist()
             _seed = next_token_ids[: min(batch_size, 4)].tolist()
             _tok = target_token_ids[_last].tolist() if len(_last) > 0 else []
-            logger.info(
-                "[AMTP][prop] bs=%d method=%s qsl=%s last_idx=%s tgt_tok@last=%s next_seed=%s",
+            amtp_log(
+                "[prop] bs=%d method=%s qsl=%s last_idx=%s tgt_tok@last=%s next_seed=%s",
                 batch_size, self.method, _qsl, _last, _tok, _seed,
             )
 
