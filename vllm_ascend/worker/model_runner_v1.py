@@ -616,15 +616,22 @@ class NPUModelRunner(GPUModelRunner):
         if self.dp_rank == 0 and get_tp_group().rank_in_group == 0:
             self._async_mtp_step = getattr(self, "_async_mtp_step", 0) + 1
             _pst = self.input_batch.prev_sampled_token_ids
-            _pst_shape = tuple(_pst.shape) if _pst is not None else None
+            _pst_val = _pst[:1, 0].tolist() if _pst is not None else None
             _pri = self.input_batch.prev_req_id_to_index
             _rids = list(self.input_batch.req_ids[:num_reqs])
             _new = [r for r in _rids if (_pri is None or r not in _pri)]
+            _ncomp = self.input_batch.num_computed_tokens_cpu[:num_reqs].tolist()
+            _ntoks = self.input_batch.num_tokens_no_spec[:num_reqs].tolist()
+            _last_ids = [
+                self.input_batch.token_ids_cpu[i, _ncomp[i] : _ncomp[i] + int(num_scheduled_tokens[i])].tolist()
+                for i in range(min(num_reqs, 2))
+            ]
             amtp_log(
-                "[prep] s=%d nreq=%d spec=%d cur=%s prev_idx=%s prev_st=%s new=%s nsched=%s",
-                self._async_mtp_step, num_reqs, self.num_spec_tokens, _rids,
+                "[prep] s=%d nreq=%d spec=%d new=%s nsched=%s ncomp=%s ntoks=%s prev_idx=%s prev_st_val=%s ids@pos=%s",
+                self._async_mtp_step, num_reqs, self.num_spec_tokens, _new,
+                num_scheduled_tokens.tolist(), _ncomp, _ntoks,
                 (None if _pri is None else [_pri.get(r) for r in _rids]),
-                _pst_shape, _new, num_scheduled_tokens.tolist(),
+                _pst_val, _last_ids,
             )
 
         # OPTIMIZATION: Start copying the block table first.
@@ -1073,6 +1080,12 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_discarded_requests,
                 )
                 self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
+                if self.num_spec_tokens > 0 and ascend_envs.VLLM_ASCEND_DISABLE_ASYNC_FASTPATH:
+                    # _copy_valid_sampled_token_count writes
+                    # input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+                    # which would re-arm the unsafe async fast-path on NPU after
+                    # _bookkeeping_sync cleared it. Drop it again here.
+                    self.input_batch.prev_sampled_token_ids = None
 
             req_scheduled_tokens = scheduler_output.num_scheduled_tokens
             if self.use_cp:
