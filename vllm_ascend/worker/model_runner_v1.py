@@ -1587,6 +1587,22 @@ class NPUModelRunner(GPUModelRunner):
                 sample_hidden_states,
                 batch_desc,
             )
+            # NPU fix: the base _copy_draft_token_ids_to_cpu skips the async path
+            # when sampling_metadata.output_token_ids is falsy / unset, leaving
+            # _draft_token_req_ids = None. take_draft_token_ids() then returns
+            # None, the scheduler never gets the draft tokens, and the next step
+            # writes -1 placeholders into token_ids_cpu (mtp.log: ids@pos=[base,-1]
+            # while [draft_out] shows propose actually produced a real id).
+            # Materialize draft_token_ids to a CPU list and set req_ids ourselves
+            # so _get_draft_token_ids_cpu's list fast-path is taken.
+            if (
+                ascend_envs.VLLM_ASCEND_DISABLE_ASYNC_FASTPATH
+                and self.use_async_scheduling
+                and isinstance(self._draft_token_ids, torch.Tensor)
+            ):
+                self._draft_token_ids = self._draft_token_ids.tolist()
+                self._draft_token_req_ids = self.input_batch.req_ids.copy()
+
             if self.dp_rank == 0 and get_tp_group().rank_in_group == 0:
                 _dt = self._draft_token_ids
                 if isinstance(_dt, torch.Tensor):
@@ -1595,14 +1611,12 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     _dt_show = _dt[: min(len(_dt) if _dt else 0, 4)] if _dt else _dt
                     _dt_kind = type(_dt).__name__
-                _samp_show = (
-                    sampled_token_ids[: min(sampled_token_ids.shape[0], 4)].tolist()
-                    if isinstance(sampled_token_ids, torch.Tensor)
-                    else (sampled_token_ids[:4] if sampled_token_ids else sampled_token_ids)
-                )
+                _omt = self.input_batch.sampling_metadata.output_token_ids
+                _omt_kind = f"{type(_omt).__name__}/len={len(_omt) if _omt is not None else 'None'}"
                 amtp_log(
-                    "[draft_out] s=%s kind=%s draft=%s sampled_in=%s",
-                    getattr(self, "_async_mtp_step", "?"), _dt_kind, _dt_show, _samp_show,
+                    "[draft_out] s=%s kind=%s draft=%s req_ids_set=%s sm.output_tok=%s",
+                    getattr(self, "_async_mtp_step", "?"), _dt_kind, _dt_show,
+                    self._draft_token_req_ids is not None, _omt_kind,
                 )
             self._copy_draft_token_ids_to_cpu(scheduler_output)
 
