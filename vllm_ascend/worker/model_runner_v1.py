@@ -1103,6 +1103,22 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_discarded_requests,
                 )
                 self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
+                # NPU's _update_states_after_model_execute is a no-op on
+                # non-hybrid models, so input_batch.num_accepted_tokens_cpu was
+                # never refreshed from real accept counts -> attention backend
+                # used a stale value when computing seq_lens for spec decode,
+                # leaving rejected-spec KV cache slots treated as valid.
+                # valid_sampled_tokens_count is already an int32 GPU tensor
+                # (shape [num_reqs]) holding base + accepted-spec counts; sync
+                # it to num_accepted_tokens_cpu so the next attention metadata
+                # build picks it up.
+                _counts_cpu = valid_sampled_tokens_count.cpu().numpy()
+                self.input_batch.num_accepted_tokens_cpu[: _counts_cpu.shape[0]] = _counts_cpu
+                if self.dp_rank == 0 and get_tp_group().rank_in_group == 0:
+                    amtp_log(
+                        "[accept] s=%s counts=%s",
+                        getattr(self, "_async_mtp_step", "?"), _counts_cpu[: min(_counts_cpu.shape[0], 4)].tolist(),
+                    )
 
             req_scheduled_tokens = scheduler_output.num_scheduled_tokens
             if self.use_cp:
@@ -2693,8 +2709,15 @@ class NPUModelRunner(GPUModelRunner):
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = len(self.attn_groups) > 1
-        # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
-        self.need_accepted_tokens = any(
+        # need_accepted_tokens controls whether num_accepted_tokens.gpu is
+        # refreshed from input_batch.num_accepted_tokens_cpu before each
+        # attention metadata build (line ~2130). NPU previously gated this on
+        # MambaSpec only, so plain transformer + spec decode (e.g. HYV3 + MTP)
+        # never updated the buffer, attention backend kept using the
+        # initial-default num_accepted_tokens, and KV cache for rejected spec
+        # slots was treated as valid -> output garbled. Enable for any spec
+        # decode setup so the buffer flows.
+        self.need_accepted_tokens = self.num_spec_tokens > 0 or any(
             [isinstance(attn_group[0].kv_cache_spec, MambaSpec) for attn_group in self.attn_groups]
         )
 
