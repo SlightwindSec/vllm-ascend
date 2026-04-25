@@ -792,18 +792,40 @@ class NPUModelRunner(GPUModelRunner):
         # self.prev_positions.np[:num_reqs] (an int64 array, -1 for new reqs)
         # to map current requests back to their previous-iteration slot, and
         # scatters input_batch.prev_sampled_token_ids + self._draft_token_ids
-        # into input_ids.gpu's base/spec slots. NPU's _prepare_inputs did not
-        # call _compute_prev_positions so prev_positions was stale, the fast
-        # path scattered onto wrong indices, and worse, when prev_positions
-        # was missing entirely the spec-slot scatter was skipped, leaving the
-        # AsyncScheduler's [-1] * num_spec_tokens placeholders in token_ids_cpu
-        # to flow into the model. Refresh prev_positions here so the base
-        # fast-path scatter is correct on NPU as well. Guarded with hasattr
-        # to keep this file safe to import against an upstream vllm without
-        # the zero-bubble buffers.
-        if hasattr(self, "_compute_prev_positions") and hasattr(self, "prev_positions"):
-            self._compute_prev_positions(num_reqs)
-            self.prev_positions.copy_to_gpu(num_reqs)
+        # into input_ids.gpu's base/spec slots. NPU's _prepare_inputs never
+        # populated prev_positions, so the fast path either scattered onto
+        # stale indices or skipped entirely, leaving the AsyncScheduler's
+        # [-1] * num_spec_tokens placeholders in token_ids_cpu to flow into
+        # the model. Refresh it ourselves: prev_positions[i] = prev_index of
+        # current req_id (or -1 for new reqs), then upload to GPU.
+        _amtp_prev_pos_kind = "missing"
+        _prev_positions = getattr(self, "prev_positions", None)
+        if _prev_positions is not None and hasattr(_prev_positions, "np"):
+            prev_map = self.input_batch.prev_req_id_to_index or {}
+            for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+                _prev_positions.np[i] = prev_map.get(req_id, -1)
+            _prev_positions.np[num_reqs:].fill(-1)
+            if hasattr(_prev_positions, "copy_to_gpu"):
+                _prev_positions.copy_to_gpu(num_reqs)
+            _amtp_prev_pos_kind = "filled"
+        # Belt-and-suspenders for the new-request case: when any current req
+        # has no entry in prev_req_id_to_index, the safest action is still to
+        # disarm the fast-path so we don't scatter stale prev_sampled_token_ids
+        # onto fresh prefill slots. This duplicates 40dd2128 but is now a
+        # corner-case guard, not the primary mechanism.
+        if self.input_batch.prev_sampled_token_ids is not None:
+            prev_map = self.input_batch.prev_req_id_to_index or {}
+            if any(rid not in prev_map for rid in self.input_batch.req_ids[:num_reqs]):
+                self.input_batch.prev_sampled_token_ids = None
+                self.input_batch.prev_req_id_to_index = None
+
+        if self.dp_rank == 0 and get_tp_group().rank_in_group == 0:
+            _pp_show = (
+                _prev_positions.np[:num_reqs].tolist()
+                if _amtp_prev_pos_kind == "filled" else None
+            )
+            amtp_log("[prev_pos] s=%s kind=%s vals=%s", getattr(self, "_async_mtp_step", "?"),
+                     _amtp_prev_pos_kind, _pp_show)
 
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, total_num_scheduled_tokens, cu_num_tokens)
