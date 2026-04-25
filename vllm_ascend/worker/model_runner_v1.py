@@ -1670,9 +1670,15 @@ class NPUModelRunner(GPUModelRunner):
 
         if not self.use_async_scheduling:
             return model_runner_output
+        async_sampled_token_ids = sampler_output.sampled_token_ids
+        if self.num_spec_tokens > 0 and ascend_envs.VLLM_ASCEND_DISABLE_ASYNC_FASTPATH:
+            # Match the [t[:1] for t ...] truncation done above in
+            # _bookkeeping_sync so the scheduler-side ncomp also advances by 1
+            # per step instead of the optimistic num_spec_tokens+1.
+            async_sampled_token_ids = async_sampled_token_ids[:, :1].contiguous()
         return AsyncGPUModelRunnerOutput(
             model_runner_output=model_runner_output,
-            sampled_token_ids=sampler_output.sampled_token_ids,
+            sampled_token_ids=async_sampled_token_ids,
             logprobs_tensors=sampler_output.logprobs_tensors,
             invalid_req_indices=invalid_req_indices,
             async_output_copy_stream=self.async_output_copy_stream,
@@ -1768,17 +1774,25 @@ class NPUModelRunner(GPUModelRunner):
                 # when preparing inputs.
                 self.input_batch.prev_sampled_token_ids = sampled_token_ids
             elif disable_async_fastpath:
-                # NPU async + spec-decode fallback: sync rejection-sampler output
-                # to CPU so token_ids_cpu carries real ids in the next step (the
-                # base fast-path needs valid_sampled_token_count_gpu / refreshed
-                # prev_positions, which are not maintained on NPU). zero-bubble
-                # is given up here in exchange for correctness.
+                # NPU async + spec-decode fallback. The scheduler's
+                # num_computed_tokens (ncomp) advances by an "optimistic accept
+                # all" assumption that gets corrected by an NPU-only kernel that
+                # doesn't exist here, so it drifts ahead of what we actually
+                # commit to token_ids_cpu (observed in mtp.log: ncomp=24 while
+                # ntoks=24, then ids@pos reads [-1, 0]).
+                #
+                # Force scheduler and model_runner into lockstep by collapsing
+                # accepted tokens to base-only (length 1) on both sides. NPU
+                # gives up spec-decode acceptance (acceptance rate becomes 0)
+                # but correctness is restored. This also clears
+                # prev_sampled_token_ids so the unsafe fast-path stays inert.
                 valid_sampled_token_ids, cu_num_tokens = RejectionSampler.parse_output(
                     sampled_token_ids,
                     self.input_batch.vocab_size,
                     discard_sampled_tokens_req_indices,
                     logprobs_tensors=logprobs_tensors,
                 )
+                valid_sampled_token_ids = [t[:1] for t in valid_sampled_token_ids]
                 self.input_batch.prev_sampled_token_ids = None
 
             self.input_batch.prev_req_id_to_index = {
