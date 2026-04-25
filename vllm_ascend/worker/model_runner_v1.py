@@ -829,6 +829,14 @@ class NPUModelRunner(GPUModelRunner):
 
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, total_num_scheduled_tokens, cu_num_tokens)
+
+        if self.dp_rank == 0 and get_tp_group().rank_in_group == 0:
+            _ii = self.input_ids.gpu[: min(total_num_scheduled_tokens, 8)].tolist()
+            _ic = self.input_ids.cpu[: min(total_num_scheduled_tokens, 8)].tolist()
+            amtp_log(
+                "[fwd_in] s=%s nsched_tot=%d input_ids.gpu=%s input_ids.cpu=%s",
+                getattr(self, "_async_mtp_step", "?"), total_num_scheduled_tokens, _ii, _ic,
+            )
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
