@@ -195,6 +195,8 @@ async def _patched_chat_completion_stream_generator(
     tokenizer: TokenizerLike,
     request_metadata: RequestResponseMetadata,
     reasoning_parser: ReasoningParser | None = None,
+    *args,
+    **kwargs,
 ) -> AsyncGenerator[str, None]:
     created_time = int(time.time())
     chunk_object_type: Final = "chat.completion.chunk"
